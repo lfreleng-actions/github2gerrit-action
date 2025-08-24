@@ -1,0 +1,24 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2025 The Linux Foundation
+
+# Markdownlint configuration
+# See: https://github.com/DavidAnson/markdownlint/blob/main/doc/Rules.md
+
+default: true
+
+# Line length rule
+MD013:
+  line_length: 120
+  code_blocks: false
+  tables: false
+  headings: false
+
+# Allow raw HTML (for compatibility)
+MD033: false
+
+# Allow duplicate headings (common in documentation)
+MD024: false
+
+# Allow emphasis markers without surrounding spaces
+MD036: false

@@ -2,62 +2,56 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
-# Action test/validation workflow
-name: "Test GitHub Action 🧪"
+name: 'Test GitHub Action 🧪'
 
 # yamllint disable-line rule:truthy
 on:
   workflow_dispatch:
   push:
-    branches: ["main"]
+    branches: ['main']
   pull_request:
-    branches: ["main"]
+    branches: ['main']
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: "${{ github.workflow }}-${{ github.ref }}"
   cancel-in-progress: true
 
 permissions: {}
 
 jobs:
-  ### Test the GitHub Action in this Repository ###
+  ### Test the GitHub Action in this Repository (PR context only) ###
   tests:
-    name: "Test local GitHub Action"
-    runs-on: ubuntu-24.04
+    name: 'Test GitHub Action'
+    runs-on: 'ubuntu-latest'
     permissions:
       contents: read
     timeout-minutes: 10 # Increase this timeout value as needed
+    # Only run on pull requests - action needs PR context
+    if: ${{ github.event_name == 'pull_request' }}
     steps:
-      - name: "Checkout repository"
+      - name: 'Checkout repository'
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
-
-      # Perform setup prior to running test(s)
-      - name: "Testing setup step"
-        shell: bash
-        run: |
-          # Testing setup step
-          echo "Testing setup step"
-          echo "Testing setup step/summary output" >> "$GITHUB_STEP_SUMMARY"
 
       - name: "Running local action: ${{ github.repository }}"
         uses: ./
+        env:
+          G2G_DRYRUN_DISABLE_NETWORK: 'true'
         with:
-          input: "test input 💬"
-
-      - name: "Validated local action: ${{ github.repository }}"
-        shell: bash
-        run: |
-          # Local action validation
-          echo "Validated local action: ${{ github.repository }}"
-          echo "Validation step summary output" >> "$GITHUB_STEP_SUMMARY"
+          GERRIT_KNOWN_HOSTS: 'dummy-host ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC...'
+          GERRIT_SSH_PRIVKEY_G2G: 'dummy-key'
+          DRY_RUN: 'true'
 
       # yamllint disable-line rule:line-length
-      - name: "Running local action: ${{ github.repository }} [Override Failure]"
+      - name: "Running local action: ${{ github.repository }} [Failure]"
         uses: ./
         id: failure
         continue-on-error: true
+        env:
+          G2G_DRYRUN_DISABLE_NETWORK: 'true'
         with:
-          invalid_input: "Some garbage"
+          GERRIT_KNOWN_HOSTS: "dummy-host ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC..."
+          GERRIT_SSH_PRIVKEY_G2G: ""
+          DRY_RUN: 'true'
 
       # Failure testing is also important
       - name: "Error if step above did NOT fail"
@@ -67,3 +61,245 @@ jobs:
           # Error if step above did NOT fail
           echo "Error: previous test step did NOT fail ❌"
           exit 1
+
+  ### CLI Integration Test with LF Gerrit Server ###
+  cli-integration-test:
+    name: 'Integration Tests'
+    runs-on: 'ubuntu-latest'
+    permissions:
+      contents: read
+    timeout-minutes: 15
+    # Only run on workflow_dispatch or push to main - tests CLI not action
+    # yamllint disable-line rule:line-length
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: 'Setup Python'
+        # yamllint disable-line rule:line-length
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version-file: 'pyproject.toml'
+
+      - name: "Install uv"
+        # yamllint disable-line rule:line-length
+        uses: astral-sh/setup-uv@4959332f0f014c5280e7eac8b70c90cb574c9f9b  # v6.6.0
+
+      - name: 'Test CLI integration with Gerrit [Dry Run]'
+        shell: bash
+        env:
+          # GitHub variables passed to CLI
+          GITHUB_TOKEN: "${{ github.token }}"
+          GITHUB_EVENT_NAME: 'workflow_dispatch'
+          GITHUB_REPOSITORY: "${{ github.repository }}"
+          GITHUB_REPOSITORY_OWNER: "${{ github.repository_owner }}"
+          GITHUB_SERVER_URL: "${{ github.server_url }}"
+          GITHUB_RUN_ID: "${{ github.run_id }}"
+          GITHUB_SHA: "${{ github.sha }}"
+          # Gerrit configuration
+          GERRIT_KNOWN_HOSTS: "${{ vars.GERRIT_KNOWN_HOSTS }}"
+          GERRIT_SSH_PRIVKEY_G2G: "${{ secrets.GERRIT_SSH_PRIVKEY_G2G }}"
+          GERRIT_SERVER: 'gerrit.linuxfoundation.org'
+          GERRIT_PROJECT: 'sandbox'
+          DRY_RUN: 'true'
+          ALLOW_DUPLICATES: 'true'
+          PRESERVE_GITHUB_PRS: 'true'
+          G2G_VERBOSE: 'true'
+          # Override .gitreview file from external repo (onap/portal-ng-bff)
+          # This forces CLI to use our environment variables instead of
+          # the external repo's .gitreview which points elsewhere
+          CI_TESTING: 'true'
+        run: |
+          echo "Testing GitHub2Gerrit CLI integration with LF Gerrit server..."
+          echo "Target PR: ${{ vars.DEPENDABOT_PR_URL }}"
+
+          if [[ -z "${{ vars.DEPENDABOT_PR_URL }}" ]]; then
+            echo "❌ DEPENDABOT_PR_URL variable not set"
+            echo "Please set this GitHub repository variable to a valid PR URL for testing"
+            exit 1
+          fi
+
+          # Debug: Show what URL we're parsing
+          echo "Parsing URL: ${{ vars.DEPENDABOT_PR_URL }}"
+
+          # Test with external PR URL using uvx
+          echo "Running: uvx --from . github2gerrit ${{ vars.DEPENDABOT_PR_URL }}"
+          uvx --from . github2gerrit "${{ vars.DEPENDABOT_PR_URL }}"
+
+          echo "✅ Dry-run CLI integration test completed successfully"
+          {
+            echo "CLI Integration test summary:"
+            echo "- Tested with external PR: ${{ vars.DEPENDABOT_PR_URL }}"
+            echo "- Target Gerrit: gerrit.linuxfoundation.org"
+            echo "- Target Project: sandbox"
+            echo "- Mode: DRY_RUN (validation only)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: "Test CLI integration with Gerrit"
+        shell: bash
+        env:
+          # GitHub context (needed for CLI operation)
+          GITHUB_TOKEN: "${{ github.token }}"
+          GITHUB_EVENT_NAME: 'workflow_dispatch'
+          GITHUB_REPOSITORY: "${{ github.repository }}"
+          GITHUB_REPOSITORY_OWNER: "${{ github.repository_owner }}"
+          GITHUB_SERVER_URL: "${{ github.server_url }}"
+          GITHUB_RUN_ID: "${{ github.run_id }}"
+          GITHUB_SHA: "${{ github.sha }}"
+          # Gerrit configuration - force override of .gitreview
+          GERRIT_KNOWN_HOSTS: "${{ vars.GERRIT_KNOWN_HOSTS }}"
+          GERRIT_SSH_PRIVKEY_G2G: "${{ secrets.GERRIT_SSH_PRIVKEY_G2G }}"
+          GERRIT_SSH_USER_G2G: 'modesevenindustrialsolutions'
+          GERRIT_SSH_USER_G2G_EMAIL: 'mwatkins@linuxfoundation.org'
+          GERRIT_SERVER: 'gerrit.linuxfoundation.org'
+          GERRIT_PROJECT: 'sandbox'
+          GERRIT_SERVER_PORT: '29418'
+          DRY_RUN: 'false'
+          ALLOW_DUPLICATES: 'true'
+          PRESERVE_GITHUB_PRS: 'true'
+          G2G_VERBOSE: 'true'
+          FETCH_DEPTH: '50'
+          USE_PR_AS_COMMIT: 'true'
+          # Override .gitreview file from external repo (onap/portal-ng-bff)
+          # This forces CLI to use our environment variables instead of
+          # the external repo's .gitreview which points elsewhere
+          CI_TESTING: 'true'
+          # Force derivation to be disabled so our overrides take precedence
+          G2G_ENABLE_DERIVATION: 'false'
+        run: |
+          echo '🚀 Integration Test Summary'
+          echo "Target PR: ${{ vars.DEPENDABOT_PR_URL }}"
+
+          # Configure git with your identity
+          # Gerrit private SSH key is linked to this account
+          git config --global user.name "$GERRIT_SSH_USER_G2G"
+          git config --global user.email "$GERRIT_SSH_USER_G2G_EMAIL"
+
+          # Push to Gerrit
+          echo "Pushing change to Gerrit..."
+          uvx --from . github2gerrit "${{ vars.DEPENDABOT_PR_URL }}"
+
+  ### ONAP Integration Test ###
+  onap-integration-test:
+    name: 'ONAP Integration Test'
+    runs-on: 'ubuntu-latest'
+    permissions:
+      contents: read
+    timeout-minutes: 15
+    # Only run on workflow_dispatch or push to main
+    # yamllint disable-line rule:line-length
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: 'Setup Python'
+        # yamllint disable-line rule:line-length
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version-file: 'pyproject.toml'
+
+      - name: "Install uv"
+        # yamllint disable-line rule:line-length
+        uses: astral-sh/setup-uv@4959332f0f014c5280e7eac8b70c90cb574c9f9b  # v6.6.0
+
+      - name: 'Configure ONAP Gerrit SSH Key'
+        shell: bash
+        env:
+          ONAP_SSH_KEY: "${{ secrets.ONAP_GERRIT_SSH_PRIVKEY_G2G }}"
+          ISSUE_ID_VALUE: "${{ vars.ISSUE_ID }}"
+        run: |
+          echo "🔑 Configuring ONAP Gerrit SSH credentials..."
+
+          # Create configuration directory
+          mkdir -p ~/.config/github2gerrit
+
+          # Escape newlines in SSH key for INI format
+          ESCAPED_SSH_KEY=$(echo "$ONAP_SSH_KEY" | sed ':a;N;$!ba;s/\n/\\n/g')
+
+          # Create configuration file with ONAP stanza
+          cat > ~/.config/github2gerrit/configuration.txt << EOF
+          [default]
+          GERRIT_HTTP_USER = "modesevenindustrialsolutions"
+
+          [onap]
+          ISSUE_ID = "$ISSUE_ID_VALUE"
+          GERRIT_SSH_PRIVKEY_G2G = "$ESCAPED_SSH_KEY"
+          EOF
+
+          echo "✅ Configuration file created successfully"
+
+          # Verify config file structure (without showing sensitive content)
+          echo "Configuration file structure:"
+          grep -E '^\[|^[A-Z_]+ =' ~/.config/github2gerrit/configuration.txt | sed 's/=.*/= [REDACTED]/'
+
+      - name: 'Run GitHub2Gerrit CLI with ONAP PR'
+        shell: bash
+        env:
+          # GitHub context
+          GITHUB_TOKEN: "${{ github.token }}"
+          GITHUB_EVENT_NAME: 'workflow_dispatch'
+          GITHUB_REPOSITORY: "${{ github.repository }}"
+          GITHUB_REPOSITORY_OWNER: "${{ github.repository_owner }}"
+          GITHUB_SERVER_URL: "${{ github.server_url }}"
+          GITHUB_RUN_ID: "${{ github.run_id }}"
+          GITHUB_SHA: "${{ github.sha }}"
+          # CLI configuration
+          G2G_VERBOSE: 'true'
+          ORGANIZATION: 'onap'
+          ALLOW_DUPLICATES: 'true'
+          G2G_SKIP_GERRIT_COMMENTS: 'true'
+          CI_TESTING: 'true'
+        run: |
+          echo "🚀 Running GitHub2Gerrit CLI with ONAP PR..."
+          echo "Target PR: https://github.com/onap/portal-ng-bff/pull/37"
+
+          # Configure git identity
+          git config --global user.name "modesevenindustrialsolutions"
+          git config --global user.email "mwatkins@linuxfoundation.org"
+
+          # Run the CLI command
+          uvx --from . github2gerrit https://github.com/onap/portal-ng-bff/pull/37
+
+          echo "✅ GitHub2Gerrit CLI execution completed"
+
+      - name: 'Secure Cleanup of SSH Credentials'
+        if: always()
+        shell: bash
+        run: |
+          echo "🧹 Performing secure cleanup of SSH credentials..."
+
+          # Overwrite configuration file with random data multiple times
+          if [[ -f ~/.config/github2gerrit/configuration.txt ]]; then
+            # Get file size for overwriting
+            file_size=$(stat -f%z ~/.config/github2gerrit/configuration.txt 2>/dev/null || \
+                        stat -c%s ~/.config/github2gerrit/configuration.txt)
+
+            # Overwrite with random data 3 times
+            for _ in {1..3}; do
+              dd if=/dev/urandom of=~/.config/github2gerrit/configuration.txt \
+                 bs="$file_size" count=1 2>/dev/null || true
+              sync
+            done
+
+            # Final overwrite with zeros
+            dd if=/dev/zero of=~/.config/github2gerrit/configuration.txt \
+               bs="$file_size" count=1 2>/dev/null || true
+            sync
+
+            # Remove the file
+            rm -f ~/.config/github2gerrit/configuration.txt
+
+            # Remove the entire directory if empty
+            rmdir ~/.config/github2gerrit 2>/dev/null || true
+            rmdir ~/.config 2>/dev/null || true
+          fi
+
+          # Clear any environment variables that might contain sensitive data
+          unset ONAP_SSH_KEY ISSUE_ID_VALUE
+
+          # Force garbage collection in bash
+          hash -r
+
+          echo "✅ Secure cleanup completed - no credentials remain on filesystem"
