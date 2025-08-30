@@ -2,36 +2,308 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
-# actions-template
-name: "🛠️ Actions Template"
-description: "Description of action"
-# Any relevant notes/observations can go here
+name: github2gerrit
+description: "Creates Gerrit changes from GitHub pull requests"
 
 inputs:
-  input:
-    description: "Description of input"
+  SUBMIT_SINGLE_COMMITS:
+    description: "Submit one commit at a time to the Gerrit repository"
+    required: false
+    default: "false"
+  USE_PR_AS_COMMIT:
+    description: "Use PR title and body as the commit message"
+    required: false
+    default: "false"
+  FETCH_DEPTH:
+    description: "Fetch depth for checkout"
+    required: false
+    default: "10"
+  PR_NUMBER:
+    description: "Pull request number to process, use 0 to process all open"
+    required: false
+    default: "0"
+
+  # SSH and identity
+  GERRIT_KNOWN_HOSTS:
+    description: "Known hosts entries for Gerrit SSH (single or multi-line)"
     required: true
+  GERRIT_SSH_PRIVKEY_G2G:
+    description: "SSH private key content used to authenticate to Gerrit"
+    required: true
+  GERRIT_SSH_USER_G2G:
+    description: >
+      Gerrit SSH username (e.g. automation bot account). In GitHub Actions,
+      automatically derived as [ORGANIZATION].gh2gerrit when not provided if
+      G2G_ENABLE_DERIVATION=true (default: false). For local CLI usage,
+      derivation is enabled by default; set
+      G2G_ENABLE_DERIVATION=false to disable.
+    required: false
+    default: ""
+  GERRIT_SSH_USER_G2G_EMAIL:
+    description: >
+      Email address associated to the Gerrit SSH user. In GitHub Actions,
+      automatically derived as
+      releng+[ORGANIZATION]-gh2gerrit@linuxfoundation.org when not provided if
+      G2G_ENABLE_DERIVATION=true (default: false). For local CLI usage,
+      derivation is enabled by default; set
+      G2G_ENABLE_DERIVATION=false to disable.
+    required: false
+    default: ""
+
+  # Behavior and metadata
+  ORGANIZATION:
+    description: "GitHub organization/owner (defaults to repo owner)"
+    required: false
+    default: "${{ github.repository_owner }}"
+  REVIEWERS_EMAIL:
+    description: "Comma-separated list of reviewer emails (optional)"
+    required: false
+    default: ""
+  ALLOW_GHE_URLS:
+    description: "Allow GitHub Enterprise URLs in direct URL mode"
+    required: false
+    default: "false"
+  PRESERVE_GITHUB_PRS:
+    description: "Do not close GitHub PRs after pushing to Gerrit"
+    required: false
+    default: "false"
+  DRY_RUN:
+    description: "Validate settings/PR metadata; do not write to Gerrit"
+    required: false
+    default: "false"
+  ALLOW_DUPLICATES:
+    description: "Allow submitting duplicate changes without error"
+    required: false
+    default: "false"
+  CI_TESTING:
+    description: "Enable CI testing mode (overrides .gitreview, handles unrelated repos)"
+    required: false
+    default: "false"
+  ISSUE_ID:
+    description: "Issue ID to include (e.g., ABC-123)"
+    required: false
+    default: ""
+  G2G_USE_SSH_AGENT:
+    description: "Use SSH agent for authentication instead of file-based keys (recommended)"
+    required: false
+    default: "true"
+
+  DUPLICATES:
+    description: >
+      Comma-separated Gerrit statuses to consider for duplicate
+      detection (e.g., open,merged,abandoned)
+    required: false
+    default: "open"
+  NORMALISE_COMMIT:
+    description: "Normalize commit messages to conventional commit format"
+    required: false
+    default: "true"
+
+  # Optional Gerrit overrides (used when .gitreview is missing)
+  GERRIT_SERVER:
+    description: >
+      Gerrit server hostname (optional; use .gitreview if present). In GitHub
+      Actions, automatically derived as gerrit.[ORGANIZATION].org when not
+      provided if G2G_ENABLE_DERIVATION=true (default: false). For local CLI
+      usage, derivation is enabled by default; set G2G_ENABLE_DERIVATION=false
+      to disable.
+    required: false
+    default: ""
+  GERRIT_SERVER_PORT:
+    description: "Gerrit SSH port (default: 29418)"
+    required: false
+    default: "29418"
+  GERRIT_PROJECT:
+    description: "Gerrit project, optional if .gitreview exists"
+    required: false
+    default: ""
+
+  # Optional Gerrit REST-related settings
+  GERRIT_HTTP_BASE_PATH:
+    description: "Optional HTTP base path for Gerrit REST (e.g. /r)"
+    required: false
+    default: ""
+  GERRIT_HTTP_USER:
+    description: "Optional Gerrit HTTP user (for REST authenticated checks)"
+    required: false
+    default: ""
+  GERRIT_HTTP_PASSWORD:
+    description: "Optional Gerrit HTTP password/token (for REST authentication)"
+    required: false
+    default: ""
 
 outputs:
-  output:
-    description: "Description of output"
-    value: ${{ steps.code.outputs.output }}
+  gerrit_change_request_url:
+    description: "Gerrit change URL(s) (newline-separated if multiple)"
+    value: ${{ steps.capture-outputs.outputs.gerrit_change_request_url }}
+  gerrit_change_request_num:
+    description: "Gerrit change number(s) (newline-separated if multiple)"
+    value: ${{ steps.capture-outputs.outputs.gerrit_change_request_num }}
+  gerrit_commit_sha:
+    description: "Patch set commit sha(s) (newline-separated if multiple)"
+    value: ${{ steps.capture-outputs.outputs.gerrit_commit_sha }}
 
 runs:
   using: "composite"
   steps:
-    - name: "Friendly Name"
-      id: code
+    - name: Setup Python
+      # yamllint disable-line rule:line-length
+      uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+      with:
+        python-version-file: 'pyproject.toml'
+        cache: "pip"
+
+    - name: Setup uv
+      # yamllint disable-line rule:line-length
+      uses: astral-sh/setup-uv@4959332f0f014c5280e7eac8b70c90cb574c9f9b  # v6.6.0
+
+    - name: Checkout repository
+      # yamllint disable-line rule:line-length
+      uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5.0.0
+      with:
+        fetch-depth: ${{ inputs.FETCH_DEPTH }}
+        # Ensure we are on the PR's head SHA when triggered by PR events
+        ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+    - name: Install required dependencies
       shell: bash
       run: |
-        # Friendly Name
-        input="${{ inputs.input }}"
-        if [ -z "$input" ]; then
-          echo "Error: mandatory input was not set/configured ❌"
-          exit 1
+        set -euo pipefail
+        uv --version
+        # Install the package into the system environment using the lockfile
+        uv pip install --system .
+
+    - name: Validate PR_NUMBER usage (non-dispatch)
+      # yamllint disable-line rule:line-length
+      if: ${{ github.event_name != 'workflow_dispatch' && inputs.PR_NUMBER != '' && inputs.PR_NUMBER != '0' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "Error: PR_NUMBER only valid during workflow_dispatch events."
+        exit 2
+
+    - name: Normalize PR_NUMBER for workflow_dispatch
+      if: ${{ github.event_name == 'workflow_dispatch' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        pr_in="${{ inputs.PR_NUMBER }}"
+        if [[ -z "${pr_in}" || "${pr_in}" == "null" ]]; then
+          pr_in="0"
+        fi
+        if ! [[ "${pr_in}" =~ ^[0-9]+$ ]]; then
+          echo "Error: PR_NUMBER must be a numeric value"
+          exit 2
+        fi
+        if [[ "${pr_in}" == "0" ]]; then
+          echo "SYNC_ALL_OPEN_PRS=true" >> "$GITHUB_ENV"
+        else
+          echo "PR_NUMBER=${pr_in}" >> "$GITHUB_ENV"
         fi
 
-        echo "output=$input" >> "$GITHUB_ENV"
-        echo "output=$input" >> "$GITHUB_OUTPUT"
-        echo "Action received: $input ✅"
-        echo "Action received: $input ✅" >> "$GITHUB_STEP_SUMMARY"
+    - name: Extract PR number and validate context
+      shell: bash
+      run: |
+        set -euo pipefail
+        # Honor PR_NUMBER or SYNC_ALL_OPEN_PRS set by workflow_dispatch
+        if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+          if [[ -n "${SYNC_ALL_OPEN_PRS:-}" ]]; then
+            echo "Processing all open pull requests via workflow_dispatch."
+          else
+            if [[ -z "${PR_NUMBER:-}" || "${PR_NUMBER}" == "null" ]]; then
+              echo "Error: provide PR_NUMBER or set 0 to process all PRs."
+              exit 2
+            fi
+            echo "PR_NUMBER=${PR_NUMBER}" >> "$GITHUB_ENV"
+          fi
+        else
+          PR_NUMBER_EVT="${{ github.event.pull_request.number || github.event.issue.number || '' }}"
+          # Do not override PR_NUMBER if previously set
+          if [[ -z "${PR_NUMBER:-}" ]]; then
+            PR_NUMBER="${PR_NUMBER_EVT}"
+            echo "PR_NUMBER=${PR_NUMBER}" >> "$GITHUB_ENV"
+          fi
+          if [[ -z "${PR_NUMBER}" || "${PR_NUMBER}" == "null" ]]; then
+            echo "Error: PR_NUMBER is empty."
+            echo "This action requires a valid pull request context."
+            echo "Current event: ${{ github.event_name }}"
+            exit 2
+          fi
+        fi
+
+
+    - name: Run github2gerrit Python CLI
+      id: run-cli
+      shell: bash
+      env:
+        # GitHub token for API access
+        GITHUB_TOKEN: ${{ github.token }}
+
+        # Primary inputs
+        SUBMIT_SINGLE_COMMITS: ${{ inputs.SUBMIT_SINGLE_COMMITS }}
+        USE_PR_AS_COMMIT: ${{ inputs.USE_PR_AS_COMMIT }}
+        FETCH_DEPTH: ${{ inputs.FETCH_DEPTH }}
+        GERRIT_KNOWN_HOSTS: ${{ inputs.GERRIT_KNOWN_HOSTS }}
+        GERRIT_SSH_PRIVKEY_G2G: ${{ inputs.GERRIT_SSH_PRIVKEY_G2G }}
+        GERRIT_SSH_USER_G2G: ${{ inputs.GERRIT_SSH_USER_G2G }}
+        GERRIT_SSH_USER_G2G_EMAIL: ${{ inputs.GERRIT_SSH_USER_G2G_EMAIL }}
+        ORGANIZATION: ${{ inputs.ORGANIZATION }}
+        REVIEWERS_EMAIL: ${{ inputs.REVIEWERS_EMAIL }}
+        ALLOW_GHE_URLS: ${{ inputs.ALLOW_GHE_URLS }}
+        PRESERVE_GITHUB_PRS: ${{ inputs.PRESERVE_GITHUB_PRS }}
+        DRY_RUN: ${{ inputs.DRY_RUN }}
+        ALLOW_DUPLICATES: ${{ inputs.ALLOW_DUPLICATES }}
+        ISSUE_ID: ${{ inputs.ISSUE_ID }}
+        CI_TESTING: ${{ inputs.CI_TESTING }}
+        DUPLICATES: ${{ inputs.DUPLICATES }}
+        NORMALISE_COMMIT: ${{ inputs.NORMALISE_COMMIT }}
+        G2G_USE_SSH_AGENT: ${{ inputs.G2G_USE_SSH_AGENT }}
+
+        # Optional Gerrit overrides (when .gitreview is missing)
+        GERRIT_SERVER: ${{ inputs.GERRIT_SERVER }}
+        GERRIT_SERVER_PORT: ${{ inputs.GERRIT_SERVER_PORT }}
+        GERRIT_PROJECT: ${{ inputs.GERRIT_PROJECT }}
+
+        # Optional REST path/creds (non-fatal in dry-run)
+        GERRIT_HTTP_BASE_PATH: ${{ inputs.GERRIT_HTTP_BASE_PATH }}
+        GERRIT_HTTP_USER: ${{ inputs.GERRIT_HTTP_USER }}
+        GERRIT_HTTP_PASSWORD: ${{ inputs.GERRIT_HTTP_PASSWORD }}
+
+        # Pass-through GitHub context used by the CLI
+        GITHUB_EVENT_NAME: ${{ github.event_name }}
+        GITHUB_REPOSITORY: ${{ github.repository }}
+        GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
+        GITHUB_SERVER_URL: ${{ github.server_url }}
+        GITHUB_RUN_ID: ${{ github.run_id }}
+        GITHUB_SHA: ${{ github.sha }}
+        GITHUB_BASE_REF: ${{ github.base_ref }}
+        GITHUB_HEAD_REF: ${{ github.head_ref }}
+        SYNC_ALL_OPEN_PRS: ${{ env.SYNC_ALL_OPEN_PRS }}
+        PR_NUMBER: ${{ env.PR_NUMBER }}
+        G2G_TEST_MODE: "false"
+      run: |
+        set -euo pipefail
+        echo "Invoking github2gerrit Python CLI..."
+        python -m github2gerrit.cli
+
+    - name: Capture outputs (best-effort)
+      id: capture-outputs
+      shell: bash
+      # Disable this rule when creating summary output
+      # yamllint disable rule:line-length
+      run: |
+        set -euo pipefail
+        # Note: The Python CLI sets outputs inside its process. If it also writes them
+        # to GITHUB_ENV/OUTPUT in a future update, these lines will capture them.
+        # Use GitHub Actions multiline output format to support newline values.
+        {
+          echo "gerrit_change_request_url<<G2G"
+          printf '%s\n' "${GERRIT_CHANGE_REQUEST_URL:-}"
+          echo "G2G"
+          echo "gerrit_change_request_num<<G2G"
+          printf '%s\n' "${GERRIT_CHANGE_REQUEST_NUM:-}"
+          echo "G2G"
+          echo "gerrit_commit_sha<<G2G"
+          printf '%s\n' "${GERRIT_COMMIT_SHA:-}"
+          echo "G2G"
+        } >> "$GITHUB_OUTPUT"
