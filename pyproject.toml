@@ -1,0 +1,222 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2025 The Linux Foundation
+
+[project]
+name = "github2gerrit"
+dynamic = ["version"]
+description = "Submit a GitHub pull request to a Gerrit repository."
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+license = "Apache-2.0"
+authors = [
+  { name = "Matthew Watkins", email = "mwatkins@linuxfoundation.org" }
+]
+keywords = ["github", "gerrit", "ci", "actions", "typer", "cli"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Build Tools",
+  "Topic :: Software Development :: Version Control",
+  "Typing :: Typed",
+]
+dependencies = [
+  # CLI framework (Typer)
+  "typer>=0.12.5",
+
+  # GitHub API client
+  "PyGithub>=2.3.0",
+
+  # Gerrit REST client
+  "pygerrit2>=2.0.0",
+
+  # git-review CLI used for pushing to Gerrit
+  "git-review>=2.3.1",
+
+  # YAML parsing for commit normalization
+  "PyYAML>=6.0.1",
+]
+
+[project.urls]
+Homepage = "https://github.com/lfreleng-actions/github2gerrit"
+Repository = "https://github.com/lfreleng-actions/github2gerrit"
+Issues = "https://github.com/lfreleng-actions/github2gerrit/issues"
+
+[project.scripts]
+github2gerrit = "github2gerrit.cli:app"
+
+[build-system]
+requires = ["setuptools>=75.0.0", "setuptools-scm>=8.0.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools_scm]
+# Dynamic versioning from git tags
+
+[project.optional-dependencies]
+dev = [
+  # Test
+  "pytest>=8.3.2",
+  "pytest-cov>=5.0.0",
+  "coverage[toml]>=7.6.1",
+
+  # Lint/format
+  "ruff>=0.6.3",
+  "mypy>=1.11.2",
+
+  # Type checking helpers
+  "pytest-mock>=3.14.0",
+  "types-requests>=2.31.0",
+  "types-click>=7.1.8",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+# Keep default rules strict; allow incremental adoption via ignores if needed.
+select = [
+  "E", "F", "I", "UP", "ASYNC", "S", "B", "A",
+  "C4", "DTZ", "EXE", "G", "PIE", "PLE", "PLW",
+  "RUF", "SIM", "T20", "TID", "TRY"
+]
+ignore = [
+  # Allow module-level prints for CLI feedback (T201)
+  "T201",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*.py" = ["S101", "S105", "PLW0603", "TRY003"]
+"sitecustomize.py" = ["S110", "SIM103", "SIM105", "PLW2901"]
+"src/github2gerrit/duplicate_detection.py" = ["S310"]
+"src/github2gerrit/gerrit_rest.py" = ["S310", "TRY301"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["github2gerrit"]
+lines-after-imports = 2
+force-single-line = true
+
+[tool.mypy]
+python_version = "3.11"
+mypy_path = ["src"]
+strict = true
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unreachable = true
+warn_unused_ignores = true
+disallow_any_generics = true
+disallow_subclassing_any = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+disallow_untyped_calls = true
+no_implicit_optional = true
+show_error_codes = true
+pretty = true
+exclude = [
+  "build/",
+  "dist/",
+  "docs/",
+  "scripts/",
+  "tests/fixtures/",
+]
+
+[[tool.mypy.overrides]]
+module = ["pygerrit2", "pygerrit2.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["click", "click.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["typer", "typer.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["pytest", "pytest.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+disallow_untyped_defs = false
+disallow_untyped_calls = false
+
+[tool.coverage.run]
+branch = true
+source = ["src/github2gerrit"]
+omit = [
+  "tests/*",
+  "src/github2gerrit/gerrit_rest.py",
+  "src/github2gerrit/similarity.py",
+  "src/github2gerrit/duplicate_detection.py",
+]
+
+[tool.coverage.report]
+fail_under = 69
+show_missing = true
+skip_covered = true
+precision = 1
+
+[tool.coverage.html]
+directory = "coverage_html_report"
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = "-ra -q --cov=github2gerrit --cov-report=term-missing --cov-report=html"
+testpaths = ["tests"]
+markers = [
+    "integration: marks tests as integration tests (deselect with '-m \"not integration\"')",
+]
+
+[tool.pyright]
+pythonVersion = "3.11"
+include = ["src", "tests"]
+exclude = [
+  "build/",
+  "dist/",
+  "docs/",
+  "scripts/",
+  "tests/fixtures/",
+  ".venv/",
+  ".mypy_cache/",
+  ".pytest_cache/",
+  ".ruff_cache/",
+  "coverage_html_report/",
+]
+typeCheckingMode = "strict"
+reportMissingImports = "none"
+reportMissingTypeStubs = "none"
+reportUnknownParameterType = "none"
+reportUnknownArgumentType = "none"
+reportUnknownLambdaType = "none"
+reportUnknownVariableType = "none"
+reportUnknownMemberType = "none"
+# Focus on real issues, ignore pedantic ones
+reportPrivateUsage = "none"
+reportUnusedFunction = "none"
+reportUnusedVariable = "none"
+reportUnusedImport = "none"
+reportConstantRedefinition = "none"
+reportUnusedClass = "none"
+reportUntypedClassDecorator = "none"
+# Enable additional type checking features
+reportCallIssue = "error"
+reportArgumentType = "error"
+reportIncompatibleVariableOverride = "error"
+reportOverlappingOverload = "error"
+reportUnsupportedDunderAll = "error"
+
+
+[tool.uv]
+# uv will manage installation based on this pyproject and lockfile.
+# No extra settings are required here; this stanza reserves the
+# namespace for future use if needed.
+managed = true

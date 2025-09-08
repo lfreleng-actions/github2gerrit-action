@@ -54,7 +54,7 @@ jobs:
           {
             echo '## Release Drafter'
             echo "Concurrency group: rd-${{ github.event_name }}-${{ github.event.number }}-${{ github.ref }}"
-          } >> "GITHUB_SUMMARY_STEP"
+          } >> "$GITHUB_STEP_SUMMARY"
           echo "Concurrency group: rd-${{ github.event_name }}-${{ github.event.number }}-${{ github.ref }}"
 
       - name: 'Update draft release'
