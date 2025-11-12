@@ -1037,6 +1037,8 @@ class Orchestrator:
                 # Prefer PR head/base refs via GitHub API when running
                 # from a direct URL when a token is available
                 try:
+                    # G2G_TARGET_URL contains the actual URL string
+                    # (truthy check)
                     if (
                         gh
                         and gh.pr_number
@@ -1177,6 +1179,8 @@ class Orchestrator:
             if inputs.dry_run:
                 project = repo.project_gerrit
                 log.info("Dry run: using derived Gerrit project '%s'", project)
+            # G2G_TARGET_URL contains actual URL string;
+            # .strip() ensures it's non-empty
             elif os.getenv("G2G_TARGET_URL", "").strip():
                 project = repo.project_gerrit
                 log.info(

@@ -9,6 +9,7 @@ This module tests the critical security requirement that temporary SSH files
 included in git commits that get pushed to Gerrit.
 """
 
+import os
 import subprocess
 import tempfile
 from pathlib import Path
@@ -27,23 +28,53 @@ def temp_workspace():
     """Create a temporary workspace directory."""
     with tempfile.TemporaryDirectory() as temp_dir:
         workspace = Path(temp_dir)
+
+        # Clear any inherited git environment variables
+        env = dict(os.environ)
+        env.pop("SSH_AUTH_SOCK", None)
+        env.pop("SSH_AGENT_PID", None)
+        env["GIT_CONFIG_GLOBAL"] = "/dev/null"
+        env["GIT_CONFIG_SYSTEM"] = "/dev/null"
+
         # Initialize as git repo
-        subprocess.run(["git", "init"], cwd=workspace, check=True)
+        subprocess.run(
+            ["git", "init"], cwd=workspace, check=True, env=env.copy()
+        )
         subprocess.run(
             ["git", "config", "user.name", "Test User"],
             cwd=workspace,
             check=True,
+            env=env.copy(),
         )
         subprocess.run(
             ["git", "config", "user.email", "test@example.com"],
             cwd=workspace,
             check=True,
+            env=env.copy(),
         )
         subprocess.run(
             ["git", "config", "commit.gpgsign", "false"],
             cwd=workspace,
             check=True,
+            env=env.copy(),
         )
+
+        # Create initial commit to establish repository state
+        test_file = workspace / ".gitkeep"
+        test_file.write_text("# Test repository\n")
+        subprocess.run(
+            ["git", "add", ".gitkeep"],
+            cwd=workspace,
+            check=True,
+            env=env.copy(),
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "Initial test commit"],
+            cwd=workspace,
+            check=True,
+            env=env.copy(),
+        )
+
         yield workspace
 
 
@@ -185,17 +216,28 @@ def test_ssh_cleanup_overwrites_sensitive_files(temp_workspace):
 
 def test_git_operations_exclude_ssh_artifacts(temp_workspace):
     """Test that demonstrates why SSH files in workspace are problematic (old behavior)."""
+    # Create isolated git environment
+    env = dict(os.environ)
+    env.pop("SSH_AUTH_SOCK", None)
+    env.pop("SSH_AGENT_PID", None)
+    env["GIT_CONFIG_GLOBAL"] = "/dev/null"
+    env["GIT_CONFIG_SYSTEM"] = "/dev/null"
+
     # Create a git repo with some content
     test_file = temp_workspace / "test_file.txt"
     test_file.write_text("test content")
 
     subprocess.run(
-        ["git", "add", "test_file.txt"], cwd=temp_workspace, check=True
-    )
-    subprocess.run(
-        ["git", "commit", "-m", "Initial commit"],
+        ["git", "add", "test_file.txt"],
         cwd=temp_workspace,
         check=True,
+        env=env.copy(),
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "Add test file"],
+        cwd=temp_workspace,
+        check=True,
+        env=env.copy(),
     )
 
     # Simulate what would happen if SSH files were created in workspace (old behavior)
@@ -210,7 +252,9 @@ def test_git_operations_exclude_ssh_artifacts(temp_workspace):
     fake_known_hosts.write_text("fake known hosts")
 
     # Try to add all files (simulating the problematic `git add .`)
-    subprocess.run(["git", "add", "."], cwd=temp_workspace, check=True)
+    subprocess.run(
+        ["git", "add", "."], cwd=temp_workspace, check=True, env=env.copy()
+    )
 
     # Check what would be committed
     result = subprocess.run(
@@ -219,6 +263,7 @@ def test_git_operations_exclude_ssh_artifacts(temp_workspace):
         capture_output=True,
         text=True,
         check=True,
+        env=env.copy(),
     ).stdout
 
     # This demonstrates the problem - SSH files WOULD be staged for commit
@@ -231,10 +276,8 @@ def test_git_operations_exclude_ssh_artifacts(temp_workspace):
     # in the workspace in the first place
 
 
-@pytest.mark.skip(reason="Complex GitHub API mocking needs fixing")
 def test_file_validation_detects_ssh_artifacts():
     """Test that file validation would detect SSH artifacts in commits."""
-    from github2gerrit.core import Orchestrator
     from github2gerrit.core import SubmissionResult
 
     workspace = Path(tempfile.mkdtemp())
@@ -251,53 +294,80 @@ def test_file_validation_detects_ssh_artifacts():
         commit_shas=["abc123def456"],
     )
 
-    # Mock the GitHub API calls
+    # Mock GitHub PR file object
+    mock_pr_file = Mock()
+    mock_pr_file.filename = "src/main.py"
+
+    # Mock the PR object with get_files method
+    mock_pr = Mock()
+    mock_pr.get_files.return_value = [mock_pr_file]
+
+    # Mock git command result with SSH artifacts (the bad case)
+    mock_git_result = Mock()
+    mock_git_result.stdout = (
+        "src/main.py\n.ssh-g2g/known_hosts\n.ssh-g2g/gerrit_key"
+    )
+
+    # Mock the GitHub API calls and git commands
     with (
-        patch("github2gerrit.core.build_client") as mock_build_client,
-        patch("github2gerrit.core.get_repo_from_env") as mock_get_repo,
-        patch("github2gerrit.core.get_pull") as mock_get_pull,
-        patch("github2gerrit.gitutils.run_cmd") as mock_run_cmd,
         patch.dict(
             "os.environ",
             {"GITHUB_REPOSITORY": "test/repo", "GITHUB_TOKEN": "fake_token"},
         ),
+        patch("github2gerrit.github_api.build_client") as mock_build_client,
+        patch("github2gerrit.github_api.get_repo_from_env") as mock_get_repo,
+        patch("github2gerrit.github_api.get_pull") as mock_get_pull,
+        patch("github2gerrit.gitutils.run_cmd") as mock_run_cmd,
+        patch("github2gerrit.core.log") as mock_log,
     ):
-        # Mock GitHub API components
+        # Setup GitHub API mocks
         mock_client = Mock()
         mock_repo = Mock()
         mock_build_client.return_value = mock_client
         mock_get_repo.return_value = mock_repo
-
-        # Mock GitHub PR files
-        mock_pr_file = Mock()
-        mock_pr_file.filename = "src/main.py"
-
-        mock_pr = Mock()
-        mock_pr.get_files.return_value = [mock_pr_file]
         mock_get_pull.return_value = mock_pr
 
-        # Mock git show output that includes SSH artifacts (the bad case)
-        mock_run_cmd.return_value.stdout = (
-            "src/main.py\n.ssh-g2g/known_hosts\n.ssh-g2g/gerrit_key"
+        # Setup git command mock
+        mock_run_cmd.return_value = mock_git_result
+
+        # Execute the validation
+        orch._validate_committed_files(gh, result)
+
+        # Verify the GitHub API was called correctly
+        mock_build_client.assert_called_once()
+        mock_get_repo.assert_called_once_with(mock_client)
+        mock_get_pull.assert_called_once_with(mock_repo, 123)
+
+        # Verify git show was called with correct parameters
+        mock_run_cmd.assert_called_once()
+        call_args = mock_run_cmd.call_args
+        assert call_args[0][0] == [
+            "git",
+            "show",
+            "--name-only",
+            "--pretty=format:",
+            "abc123def456",
+        ]
+        assert call_args[1]["cwd"] == workspace
+
+        # Verify error was logged for SSH artifacts
+        error_calls = [
+            call
+            for call in mock_log.error.call_args_list
+            if "SSH artifacts detected" in str(call)
+        ]
+        assert len(error_calls) > 0, "Expected error log for SSH artifacts"
+
+        # Verify the specific suspicious files were detected
+        logged_message = str(mock_log.error.call_args_list)
+        assert (
+            ".ssh-g2g/known_hosts" in logged_message
+            or "ssh" in logged_message.lower()
         )
 
-        # Capture log output
-        with patch("github2gerrit.core.log") as mock_log:
-            orch._validate_committed_files(gh, result)
 
-            # Verify error was logged for SSH artifacts
-            error_calls = [
-                call
-                for call in mock_log.error.call_args_list
-                if "SSH artifacts detected" in str(call)
-            ]
-            assert len(error_calls) > 0, "Expected error log for SSH artifacts"
-
-
-@pytest.mark.skip(reason="Complex GitHub API mocking needs fixing")
 def test_file_validation_passes_for_clean_commits():
     """Test that file validation passes for commits without artifacts."""
-    from github2gerrit.core import Orchestrator
     from github2gerrit.core import SubmissionResult
 
     workspace = Path(tempfile.mkdtemp())
@@ -314,44 +384,76 @@ def test_file_validation_passes_for_clean_commits():
         commit_shas=["abc123def456"],
     )
 
-    # Mock the GitHub API calls
+    # Mock GitHub PR file object
+    mock_pr_file = Mock()
+    mock_pr_file.filename = "src/main.py"
+
+    # Mock the PR object with get_files method
+    mock_pr = Mock()
+    mock_pr.get_files.return_value = [mock_pr_file]
+
+    # Mock git command result with only clean files
+    mock_git_result = Mock()
+    mock_git_result.stdout = "src/main.py"
+
+    # Mock the GitHub API calls and git commands
     with (
-        patch("github2gerrit.core.build_client") as mock_build_client,
-        patch("github2gerrit.core.get_repo_from_env") as mock_get_repo,
-        patch("github2gerrit.core.get_pull") as mock_get_pull,
-        patch("github2gerrit.gitutils.run_cmd") as mock_run_cmd,
         patch.dict(
             "os.environ",
             {"GITHUB_REPOSITORY": "test/repo", "GITHUB_TOKEN": "fake_token"},
         ),
+        patch("github2gerrit.github_api.build_client") as mock_build_client,
+        patch("github2gerrit.github_api.get_repo_from_env") as mock_get_repo,
+        patch("github2gerrit.github_api.get_pull") as mock_get_pull,
+        patch("github2gerrit.gitutils.run_cmd") as mock_run_cmd,
+        patch("github2gerrit.core.log") as mock_log,
     ):
-        # Mock GitHub API components
+        # Setup GitHub API mocks
         mock_client = Mock()
         mock_repo = Mock()
         mock_build_client.return_value = mock_client
         mock_get_repo.return_value = mock_repo
-
-        # Mock GitHub PR files
-        mock_pr_file = Mock()
-        mock_pr_file.filename = "src/main.py"
-
-        mock_pr = Mock()
-        mock_pr.get_files.return_value = [mock_pr_file]
         mock_get_pull.return_value = mock_pr
 
-        # Mock git show output with only expected files
-        mock_run_cmd.return_value.stdout = "src/main.py"
+        # Setup git command mock
+        mock_run_cmd.return_value = mock_git_result
 
-        # Capture log output
-        with patch("github2gerrit.core.log") as mock_log:
-            orch._validate_committed_files(gh, result)
+        # Execute the validation
+        orch._validate_committed_files(gh, result)
 
-            # Verify no error was logged
-            error_calls = [
-                call
-                for call in mock_log.error.call_args_list
-                if "SSH artifacts detected" in str(call)
-            ]
-            assert len(error_calls) == 0, (
-                "No errors should be logged for clean commits"
-            )
+        # Verify the GitHub API was called correctly
+        mock_build_client.assert_called_once()
+        mock_get_repo.assert_called_once_with(mock_client)
+        mock_get_pull.assert_called_once_with(mock_repo, 123)
+
+        # Verify git show was called with correct parameters
+        mock_run_cmd.assert_called_once()
+        call_args = mock_run_cmd.call_args
+        assert call_args[0][0] == [
+            "git",
+            "show",
+            "--name-only",
+            "--pretty=format:",
+            "abc123def456",
+        ]
+        assert call_args[1]["cwd"] == workspace
+
+        # Verify no error was logged for SSH artifacts
+        error_calls = [
+            call
+            for call in mock_log.error.call_args_list
+            if "SSH artifacts detected" in str(call)
+        ]
+        assert len(error_calls) == 0, (
+            "No errors should be logged for clean commits"
+        )
+
+        # Verify no critical errors were logged at all
+        critical_calls = [
+            call
+            for call in mock_log.error.call_args_list
+            if "CRITICAL" in str(call)
+        ]
+        assert len(critical_calls) == 0, (
+            "No critical errors should be logged for clean commits"
+        )

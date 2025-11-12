@@ -1,6 +1,58 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
+"""
+Test Configuration and Environment Isolation
+═════════════════════════════════════════════
+
+This conftest.py provides critical test environment isolation to ensure:
+1. Deterministic test execution across all environments
+2. Prevention of cross-test contamination
+3. Consistent behavior in local, CI, and pre-commit contexts
+
+Key Isolation Strategies:
+─────────────────────────
+
+1. **Git Environment Isolation** (isolate_git_environment fixture)
+   - Clears SSH agent state to prevent host SSH key usage
+   - Sets consistent git identity for all tests
+   - Configures non-interactive SSH for git operations
+   - **REQUIRED**: Without this, pre-commit pytest runs fail randomly
+
+2. **GitHub CI Mode Isolation** (disable_github_ci_mode fixture)
+   - Disables GitHub Actions detection during tests
+   - Ensures config loading works normally in CI environments
+   - Prevents tests from behaving differently in GitHub Actions
+
+3. **Coverage Data Isolation** (pytest_sessionstart)
+   - Removes stale coverage files to prevent data mixing
+   - Uses unique coverage files per test run
+   - Prevents branch/statement coverage conflicts
+
+4. **Config File Isolation** (pytest_sessionstart)
+   - Uses temporary, empty config files for tests
+   - Prevents tests from reading user's ~/.config/github2gerrit/
+   - Ensures hermetic test execution
+
+Common Issues Prevented:
+────────────────────────
+
+✓ Random test failures in pre-commit hooks (SSH agent pollution)
+✓ Tests passing locally but failing in CI (environment differences)
+✓ Coverage data mixing errors (parallel test runs)
+✓ Tests reading/writing real user configuration files
+✓ Git operations using host SSH keys instead of test keys
+✓ Inconsistent git identity across test runs
+
+For test authors:
+─────────────────
+
+All fixtures with autouse=True are INTENTIONALLY global. Do not disable them
+unless you have a specific need and understand the implications. If you need
+custom configuration, override specific environment variables within your test
+rather than skipping the fixture.
+"""
+
 from __future__ import annotations
 
 import os
@@ -146,3 +198,82 @@ def disable_github_ci_mode(monkeypatch, request):
         not in request.node.name
     ):
         monkeypatch.setenv("G2G_AUTO_SAVE_CONFIG", "false")
+
+
+@pytest.fixture(autouse=True)
+def isolate_git_environment(monkeypatch):
+    """
+    Isolate git environment for each test to prevent cross-test contamination.
+
+    ⚠️  IMPORTANT: autouse=True is REQUIRED for test suite stability
+
+    Why this fixture is globally applied:
+    ────────────────────────────────────────────────────────────────
+
+    1. **Pre-commit Hook Failures**: Without this fixture, pytest running from
+       pre-commit hooks resulted in random test failures due to SSH agent state
+       pollution from the host environment.
+
+    2. **Cross-Test Contamination**: Git operations in one test can affect
+       subsequent tests through shared environment variables (SSH_AUTH_SOCK,
+       SSH_AGENT_PID, git identity configuration).
+
+    3. **Non-Deterministic Behavior**: Tests that don't explicitly need git
+       isolation can still be affected if they execute git commands internally
+       or depend on code that does.
+
+    4. **CI/CD Consistency**: Ensures tests behave identically whether run
+       locally, in GitHub Actions, or via pre-commit hooks.
+
+    What this fixture provides:
+    ────────────────────────────────────────────────────────────────
+
+    - Clean SSH agent state (no SSH_AUTH_SOCK or SSH_AGENT_PID)
+    - Consistent git identity across all tests (Test Bot <test-bot@example.org>)
+    - Non-interactive SSH configuration for git operations
+    - Prevention of unintended SSH key usage from host environment
+
+    Overriding this fixture:
+    ────────────────────────────────────────────────────────────────
+
+    If a specific test needs different git configuration:
+
+    ```python
+    def test_custom_git_config(monkeypatch, isolate_git_environment):
+        # The fixture still runs, but you can override specific vars
+        monkeypatch.setenv("GIT_AUTHOR_NAME", "Custom Author")
+        # ... rest of test
+    ```
+
+    Or use a marker to skip the fixture (requires pytest configuration):
+
+    ```python
+    @pytest.mark.no_git_isolation
+    def test_with_host_git_config():
+        # This test would need special handling in conftest.py
+        pass
+    ```
+
+    Performance Impact:
+    ────────────────────────────────────────────────────────────────
+
+    Minimal - only sets/unsets environment variables via monkeypatch,
+    which is automatically cleaned up by pytest after each test.
+    """
+    # Clear SSH-related environment variables to ensure clean state
+    monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+    monkeypatch.delenv("SSH_AGENT_PID", raising=False)
+
+    # Set consistent git identity for all tests
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "Test Bot")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "test-bot@example.org")
+    monkeypatch.setenv("GIT_COMMITTER_NAME", "Test Bot")
+    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test-bot@example.org")
+
+    # Configure non-interactive SSH for git operations
+    monkeypatch.setenv(
+        "GIT_SSH_COMMAND",
+        "ssh -o IdentitiesOnly=yes -o IdentityAgent=none -o BatchMode=yes "
+        "-o PreferredAuthentications=publickey -o StrictHostKeyChecking=yes "
+        "-o PasswordAuthentication=no -o ConnectTimeout=5",
+    )

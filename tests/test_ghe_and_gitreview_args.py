@@ -8,6 +8,8 @@ from typing import Any
 
 import pytest
 
+from github2gerrit.cli import GitHubPRTarget
+from github2gerrit.cli import GitHubRepoTarget
 from github2gerrit.cli import _parse_github_target
 from github2gerrit.core import GerritInfo
 from github2gerrit.core import Orchestrator
@@ -26,15 +28,21 @@ def test_ghe_url_parsing_toggle(monkeypatch: pytest.MonkeyPatch) -> None:
 
     # Default: reject GHE (env unset -> default False)
     monkeypatch.delenv("ALLOW_GHE_URLS", raising=False)
-    assert _parse_github_target(ghe_url) == (None, None, None)
+    assert _parse_github_target(ghe_url) == GitHubRepoTarget(
+        owner=None, repo=None
+    )
 
     # Enable GHE: accept non-github.com hosts
     monkeypatch.setenv("ALLOW_GHE_URLS", "true")
-    assert _parse_github_target(ghe_url) == ("org", "repo", 123)
+    assert _parse_github_target(ghe_url) == GitHubPRTarget(
+        owner="org", repo="repo", pr_number=123
+    )
 
     # With ALLOW_GHE_URLS=false, standard github.com URL still parses
     monkeypatch.setenv("ALLOW_GHE_URLS", "false")
-    assert _parse_github_target(gh_url) == ("org", "repo", 456)
+    assert _parse_github_target(gh_url) == GitHubPRTarget(
+        owner="org", repo="repo", pr_number=456
+    )
 
 
 def test_git_review_args_include_branch_and_repeated_reviewer_flags(

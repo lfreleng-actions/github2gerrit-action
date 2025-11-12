@@ -17,6 +17,8 @@ else:
 
     parametrize = mark.parametrize
 
+from github2gerrit.cli import GitHubPRTarget
+from github2gerrit.cli import GitHubRepoTarget
 from github2gerrit.cli import _parse_github_target
 
 
@@ -26,49 +28,49 @@ from github2gerrit.cli import _parse_github_target
         # Standard PR URLs
         (
             "https://github.com/onap/portal-ng-bff/pull/33",
-            ("onap", "portal-ng-bff", 33),
+            GitHubPRTarget(owner="onap", repo="portal-ng-bff", pr_number=33),
         ),
         (
             "https://www.github.com/onap/portal-ng-bff/pull/33",
-            ("onap", "portal-ng-bff", 33),
+            GitHubPRTarget(owner="onap", repo="portal-ng-bff", pr_number=33),
         ),
         # Repo URL (no PR number)
         (
             "https://github.com/onap/portal-ng-bff",
-            ("onap", "portal-ng-bff", None),
+            GitHubRepoTarget(owner="onap", repo="portal-ng-bff"),
         ),
         # 'pulls' accepted as well
         (
             "https://github.com/onap/portal-ng-bff/pulls/33",
-            ("onap", "portal-ng-bff", 33),
+            GitHubPRTarget(owner="onap", repo="portal-ng-bff", pr_number=33),
         ),
         # Trailing slashes should be fine
         (
             "https://github.com/onap/portal-ng-bff/",
-            ("onap", "portal-ng-bff", None),
+            GitHubRepoTarget(owner="onap", repo="portal-ng-bff"),
         ),
         # Query string and fragment should be ignored by parsing
         (
             "https://github.com/onap/portal-ng-bff/pull/33?foo=bar#section",
-            ("onap", "portal-ng-bff", 33),
+            GitHubPRTarget(owner="onap", repo="portal-ng-bff", pr_number=33),
         ),
         # Non-integer PR number: pr component should become None
         (
             "https://github.com/onap/portal-ng-bff/pull/not-a-number",
-            ("onap", "portal-ng-bff", None),
+            GitHubRepoTarget(owner="onap", repo="portal-ng-bff"),
         ),
         # Non-GitHub domain: reject
         (
             "https://gitlab.com/onap/portal-ng-bff/pull/33",
-            (None, None, None),
+            GitHubRepoTarget(owner=None, repo=None),
         ),
         # Insufficient path parts: reject
-        ("https://github.com/onap", (None, None, None)),
-        ("https://github.com/", (None, None, None)),
-        ("https://github.com", (None, None, None)),
+        ("https://github.com/onap", GitHubRepoTarget(owner=None, repo=None)),
+        ("https://github.com/", GitHubRepoTarget(owner=None, repo=None)),
+        ("https://github.com", GitHubRepoTarget(owner=None, repo=None)),
     ],
 )
 def test_parse_github_target(
-    url: str, expected: tuple[object, object, object]
+    url: str, expected: GitHubPRTarget | GitHubRepoTarget
 ) -> None:
     assert _parse_github_target(url) == expected

@@ -68,7 +68,7 @@ on:
       PRESERVE_GITHUB_PRS:
         description: "Do not close GitHub PRs after pushing to Gerrit"
         required: false
-        default: false
+        default: true
         type: boolean
       DRY_RUN:
         description: "Validate settings and PR metadata; do not write to Gerrit"

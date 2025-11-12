@@ -104,7 +104,7 @@ def _base_env(tmp_path: Path) -> dict[str, str]:
         "REVIEWERS_EMAIL": "",
         # Boolean flags
         "DRY_RUN": "false",
-        "PRESERVE_GITHUB_PRS": "false",
+        "PRESERVE_GITHUB_PRS": "true",
         "ALLOW_DUPLICATES": "false",
         "CI_TESTING": "false",
         # GitHub context

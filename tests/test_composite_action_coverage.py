@@ -157,7 +157,7 @@ def default_inputs():
         "ORGANIZATION": "test-org",
         "REVIEWERS_EMAIL": "",
         "ALLOW_GHE_URLS": "false",
-        "PRESERVE_GITHUB_PRS": "false",
+        "PRESERVE_GITHUB_PRS": "true",
         "DRY_RUN": "false",
         "ALLOW_DUPLICATES": "false",
         "CI_TESTING": "false",
@@ -647,7 +647,7 @@ class TestIntegrationScenarios:
 
         # Should have sensible defaults for PR workflow
         assert inputs["SUBMIT_SINGLE_COMMITS"]["default"] == "false"
-        assert inputs["PRESERVE_GITHUB_PRS"]["default"] == "false"
+        assert inputs["PRESERVE_GITHUB_PRS"]["default"] == "true"
         assert inputs["DRY_RUN"]["default"] == "false"
 
     def test_dry_run_capability(self, action_tester):

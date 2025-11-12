@@ -375,7 +375,7 @@ class TestEnvironmentDefaults:
             "ORGANIZATION": "${{ github.repository_owner }}",
             "REVIEWERS_EMAIL": "",
             "ALLOW_GHE_URLS": "false",
-            "PRESERVE_GITHUB_PRS": "false",
+            "PRESERVE_GITHUB_PRS": "true",
             "DRY_RUN": "false",
             "ALLOW_DUPLICATES": "false",
             "CI_TESTING": "false",

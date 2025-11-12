@@ -52,7 +52,11 @@ inputs:
   PRESERVE_GITHUB_PRS:
     description: "Do not close GitHub PRs after pushing to Gerrit"
     required: false
-    default: "false"
+    default: "true"
+  CLOSE_MERGED_PRS:
+    description: "Close GitHub PRs when corresponding Gerrit changes are merged"
+    required: false
+    default: "true"
   DRY_RUN:
     description: "Validate settings/PR metadata; do not write to Gerrit"
     required: false
@@ -65,10 +69,20 @@ inputs:
     description: "Enable CI testing mode; overrides .gitreview, creates orphan commits"
     required: false
     default: "false"
+  FORCE:
+    description: "Force PR closure regardless of Gerrit change status (abandoned, etc)"
+    required: false
+    default: "false"
   ISSUE_ID:
     description: "Issue ID to include (e.g., ABC-123)"
     required: false
     default: ""
+  USE_LOCAL_ACTION:
+    description: >-
+      Use local repository action/code instead of the PyPI package.
+      Set to 'true' when testing changes in a fork or branch before merging.
+    required: false
+    default: "false"
   G2G_USE_SSH_AGENT:
     description: "Use SSH agent for authentication instead of file-based keys (recommended)"
     required: false
@@ -157,7 +171,8 @@ runs:
         set -euo pipefail
         uv --version
         # Install locally for self-testing, use uvx for external repos
-        if [[ "${{ github.repository }}" =~ lfreleng-actions/github2gerrit-action ]]; then
+        if [[ "${{ inputs.USE_LOCAL_ACTION }}" == "true" ]] || \
+           [[ "${{ github.repository }}" =~ lfreleng-actions/github2gerrit-action ]]; then
           echo "Installing with: uv pip install --system ${{ github.action_path }}"
           uv pip install --system ${{ github.action_path }}
         else
@@ -199,6 +214,16 @@ runs:
       run: |
         # Extract PR number, validate context
         set -euo pipefail
+
+        # Push events don't need PR_NUMBER (used for closing merged PRs)
+        # The CLI handles push events specially via _process_close_merged_prs()
+        if [[ "${{ github.event_name }}" == "push" ]]; then
+          echo "Push event detected - will process merged commits for PR closure"
+          # Set PR_NUMBER to empty to indicate this is intentional for push events
+          echo "PR_NUMBER=" >> "$GITHUB_ENV"
+          exit 0
+        fi
+
         # Honor PR_NUMBER or SYNC_ALL_OPEN_PRS set by workflow_dispatch
         if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
           if [[ -n "${SYNC_ALL_OPEN_PRS:-}" ]]; then
@@ -249,6 +274,8 @@ runs:
         ISSUE_ID: ${{ inputs.ISSUE_ID }}
         ISSUE_ID_LOOKUP_JSON: ${{ inputs.ISSUE_ID_LOOKUP_JSON }}
         CI_TESTING: ${{ inputs.CI_TESTING }}
+        CLOSE_MERGED_PRS: ${{ inputs.CLOSE_MERGED_PRS }}
+        FORCE: ${{ inputs.FORCE }}
         DUPLICATE_TYPES: ${{ inputs.DUPLICATE_TYPES }}
         NORMALISE_COMMIT: ${{ inputs.NORMALISE_COMMIT }}
         G2G_USE_SSH_AGENT: ${{ inputs.G2G_USE_SSH_AGENT }}
@@ -280,8 +307,9 @@ runs:
       run: |
         # Run github2gerrit Python CLI
         set -euo pipefail
-        # Use different invocation methods based on repository
-        if [[ "${{ github.repository }}" =~ lfreleng-actions/github2gerrit-action ]]; then
+        # Use different invocation methods based on repository or USE_LOCAL_ACTION flag
+        if [[ "${{ inputs.USE_LOCAL_ACTION }}" == "true" ]] || \
+           [[ "${{ github.repository }}" =~ lfreleng-actions/github2gerrit-action ]]; then
           echo "Running:python -m github2gerrit.cli"
           python -m github2gerrit.cli
         else
