@@ -1407,7 +1407,11 @@ def _process_single(
             log.debug("About to call orch.execute() - where issues often occur")
 
             try:
-                result = orch.execute(inputs=data, gh=gh)
+                # Pass operation mode to orchestrator
+                operation_mode = os.getenv("G2G_OPERATION_MODE", "unknown")
+                result = orch.execute(
+                    inputs=data, gh=gh, operation_mode=operation_mode
+                )
                 log.debug("orch.execute() completed successfully")
             except Exception:
                 log.exception("Exception during orch.execute()")
@@ -1437,6 +1441,40 @@ def _process_single(
             DuplicateChangeError,
             ConfigurationError,
         ) as exc:
+            # Enhanced error handling for UPDATE operations
+            operation_mode = os.getenv("G2G_OPERATION_MODE", "unknown")
+
+            if operation_mode == "update" and isinstance(
+                exc, OrchestratorError
+            ):
+                error_msg = str(exc)
+                if (
+                    "no existing change found" in error_msg.lower()
+                    or "UPDATE operation requires" in error_msg
+                ):
+                    safe_console_print(
+                        "❌ UPDATE FAILED: Cannot update non-existent "
+                        "Gerrit change",
+                        style="red",
+                        progress_tracker=progress_tracker,
+                    )
+                    safe_console_print(
+                        f"💡 PR #{gh.pr_number} has not been previously "
+                        f"processed by GitHub2Gerrit.",
+                        style="yellow",
+                        progress_tracker=progress_tracker,
+                    )
+                    safe_console_print(
+                        "   To create a new change, trigger the 'opened' "
+                        "workflow action.",
+                        style="yellow",
+                        progress_tracker=progress_tracker,
+                    )
+                    if progress_tracker:
+                        progress_tracker.add_error(
+                            "No existing change found for UPDATE"
+                        )
+
             # Convert and propagate structured errors
             if isinstance(exc, OrchestratorError):
                 converted_error = convert_orchestrator_error(exc)
@@ -1796,25 +1834,69 @@ def _process_close_merged_prs(data: Inputs, gh: GitHubContext) -> None:
         progress_tracker = DummyProgressTracker("Gerrit PR Closer", target)
 
     try:
-        # Get recent commits from the current branch
-        # We'll look at the last few commits to find ones with
-        # GitHub-PR trailers
-        log.debug("Fetching recent commits to check for GitHub PR trailers")
+        # Get commits from the push event payload if available
+        # This is more reliable than a sliding window because it only processes
+        # commits that were actually part of this push event
+        log.debug("Fetching commits from push event for GitHub PR trailers")
 
-        # Get the last 10 commits
-        result = git(["log", "-10", "--format=%H"])
-        commit_shas = [
-            line.strip()
-            for line in result.stdout.strip().split("\n")
-            if line.strip()
-        ]
+        commit_shas = []
+
+        # Try to read commits from the GitHub push event payload
+        if gh.event_path and gh.event_path.exists():
+            try:
+                import json
+
+                with gh.event_path.open() as f:
+                    event_payload = json.load(f)
+
+                # Extract commit SHAs from the push event
+                if "commits" in event_payload:
+                    commit_shas = [
+                        commit["id"]
+                        for commit in event_payload["commits"]
+                        if "id" in commit
+                    ]
+                    log.debug(
+                        "Found %d commit(s) in push event payload",
+                        len(commit_shas),
+                    )
+
+                # If no commits in payload, fall back to after commit
+                if not commit_shas and "after" in event_payload:
+                    after_sha = event_payload["after"]
+                    if (
+                        after_sha
+                        and after_sha
+                        != "0000000000000000000000000000000000000000"
+                    ):
+                        commit_shas = [after_sha]
+                        log.debug(
+                            "Using 'after' SHA from push event: %s",
+                            after_sha[:8],
+                        )
+            except Exception as exc:
+                log.debug(
+                    "Could not read commits from push event payload: %s", exc
+                )
+
+        # Fallback: use recent commits from git log (sliding window approach)
+        if not commit_shas:
+            log.debug("No commits found in push event, falling back to git log")
+            result = git(["log", f"-{data.fetch_depth}", "--format=%H"])
+            commit_shas = [
+                line.strip()
+                for line in result.stdout.strip().split("\n")
+                if line.strip()
+            ]
 
         if not commit_shas:
-            log.info("No recent commits found")
+            log.info("No commits found to analyze")
             progress_tracker.stop()
             return
 
-        log.info("Found %d recent commit(s) to analyze", len(commit_shas))
+        log.info(
+            "Found %d commit(s) to analyze for PR closure", len(commit_shas)
+        )
 
         progress_tracker.update_operation(
             f"Processing {len(commit_shas)} commit(s) for PR closure..."
@@ -1864,6 +1946,20 @@ def _process() -> None:
 
     gh = _read_github_context()
     _display_effective_config(data, gh)
+
+    # Detect PR operation mode for routing
+    operation_mode = gh.get_operation_mode()
+    if operation_mode != models.PROperationMode.UNKNOWN:
+        log.info("🔍 Detected PR operation mode: %s", operation_mode.value)
+        if operation_mode == models.PROperationMode.UPDATE:
+            log.info(
+                "📝 PR update (synchronize) event - will update existing "
+                "Gerrit change"
+            )
+        elif operation_mode == models.PROperationMode.CREATE:
+            log.info("🆕 New PR (opened) event - will create new Gerrit change")
+        elif operation_mode == models.PROperationMode.EDIT:
+            log.info("✏️  PR edit event - will sync metadata to Gerrit change")
 
     # Close merged PRs: handle Gerrit-merged changes closing GitHub PRs
     # This runs in two scenarios:
@@ -1936,6 +2032,9 @@ def _process() -> None:
             ),
         )
 
+    # Store operation mode in environment for downstream use
+    os.environ["G2G_OPERATION_MODE"] = operation_mode.value
+
     # Test mode handled earlier
 
     # Execute single-PR submission
@@ -1963,68 +2062,79 @@ def _process() -> None:
         _extract_and_display_pr_info(gh, data, progress_tracker)
 
     # Check for duplicates in single-PR mode (before workspace setup)
+    # For UPDATE operations, skip duplicate check - we EXPECT a change to exist
     if gh.pr_number and not env_bool("SYNC_ALL_OPEN_PRS", False):
-        try:
-            if data.duplicates_filter:
-                os.environ["DUPLICATE_TYPES"] = data.duplicates_filter
-            # Generate expected GitHub hash for trailer-aware duplicate
-            # detection
-            expected_github_hash = (
-                DuplicateDetector._generate_github_change_hash(gh)
+        if operation_mode == models.PROperationMode.UPDATE:
+            log.info(
+                "⏩ Skipping duplicate check for UPDATE operation "
+                "(change expected to exist)"
             )
-            if progress_tracker:
-                progress_tracker.update_operation("Checking for duplicates...")
-            log.debug(
-                "Starting duplicate detection for PR #%s in %s",
-                gh.pr_number,
-                gh.repository,
-            )
-            log.debug(
-                "Expected GitHub hash for duplicate detection: %s",
-                expected_github_hash,
-            )
-            check_for_duplicates(
-                gh,
-                allow_duplicates=data.allow_duplicates,
-                expected_github_hash=expected_github_hash,
-            )
-            log.debug("Duplicate check completed successfully")
-            if progress_tracker:
-                progress_tracker.update_operation("Duplicate check completed")
-        except DuplicateChangeError as exc:
-            if progress_tracker:
-                progress_tracker.add_error("Duplicate change detected")
-                progress_tracker.stop()
+        else:
+            try:
+                if data.duplicates_filter:
+                    os.environ["DUPLICATE_TYPES"] = data.duplicates_filter
+                # Generate expected GitHub hash for trailer-aware duplicate
+                # detection
+                expected_github_hash = (
+                    DuplicateDetector._generate_github_change_hash(gh)
+                )
+                if progress_tracker:
+                    progress_tracker.update_operation(
+                        "Checking for duplicates..."
+                    )
+                log.debug(
+                    "Starting duplicate detection for PR #%s in %s",
+                    gh.pr_number,
+                    gh.repository,
+                )
+                log.debug(
+                    "Expected GitHub hash for duplicate detection: %s",
+                    expected_github_hash,
+                )
+                check_for_duplicates(
+                    gh,
+                    allow_duplicates=data.allow_duplicates,
+                    expected_github_hash=expected_github_hash,
+                )
+                log.debug("Duplicate check completed successfully")
+                if progress_tracker:
+                    progress_tracker.update_operation(
+                        "Duplicate check completed"
+                    )
+            except DuplicateChangeError as exc:
+                if progress_tracker:
+                    progress_tracker.add_error("Duplicate change detected")
+                    progress_tracker.stop()
 
-            # Display clear Rich console output for duplicate detection
-            if exc.urls:
-                urls_display = ", ".join(exc.urls)
+                # Display clear Rich console output for duplicate detection
+                if exc.urls:
+                    urls_display = ", ".join(exc.urls)
+                    safe_console_print(
+                        f"❌ Duplicate Gerrit change blocked submission: "
+                        f"{urls_display}",
+                        style="red",
+                        progress_tracker=progress_tracker,
+                    )
+                else:
+                    safe_console_print(
+                        "❌ Duplicate Gerrit change blocked submission",
+                        style="red",
+                        progress_tracker=progress_tracker,
+                    )
+
                 safe_console_print(
-                    f"❌ Duplicate Gerrit change blocked submission: "
-                    f"{urls_display}",
-                    style="red",
+                    "💡 Use --allow-duplicates to override this check.",
+                    style="yellow",
                     progress_tracker=progress_tracker,
                 )
-            else:
-                safe_console_print(
-                    "❌ Duplicate Gerrit change blocked submission",
-                    style="red",
-                    progress_tracker=progress_tracker,
+                exit_for_duplicate_error(
+                    message=(
+                        "❌ Duplicate change detected; use "
+                        "--allow-duplicates to override"
+                    ),
+                    details=str(exc),
+                    exception=exc,
                 )
-
-            safe_console_print(
-                "💡 Use --allow-duplicates to override this check.",
-                style="yellow",
-                progress_tracker=progress_tracker,
-            )
-            exit_for_duplicate_error(
-                message=(
-                    "❌ Duplicate change detected; use --allow-duplicates to "
-                    "override"
-                ),
-                details=str(exc),
-                exception=exc,
-            )
 
     progress_tracker.update_operation("Processing pull request...")
 

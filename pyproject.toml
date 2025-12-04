@@ -217,9 +217,13 @@ directory = "coverage_html_report"
 
 [tool.pytest.ini_options]
 minversion = "8.0"
-addopts = "-ra -q --cov=github2gerrit --cov-report=term-missing --cov-report=html"
+addopts = "-ra -q --cov=github2gerrit --cov-report=term-missing --cov-report=html --strict-markers -p no:randomly"
 testpaths = ["tests"]
 asyncio_default_fixture_loop_scope = "function"
+# Enable better isolation
+usefixtures = []
+# Ensure deterministic test ordering
+# Note: Tests should not depend on execution order
 markers = [
     "integration: marks tests as integration tests (deselect with '-m \"not integration\"')",
 ]

@@ -20,19 +20,86 @@ Gerrit `Change-Id` trailers to create or update changes.
 ## How it works (high level)
 
 - Discover pull request context and inputs.
+- **Detects PR operation mode** (CREATE, UPDATE, EDIT) based on event type.
 - Detects and prevents tool runs from creating duplicate changes.
 - Reads `.gitreview` for Gerrit host, port, and project.
 - When run locally, will pull `.gitreview` from the remote repository.
 - Sets up `git` user config and SSH for Gerrit.
+- **For UPDATE operations**: Finds and reuses existing Gerrit Change-IDs.
 - Prepare commits:
   - one‑by‑one cherry‑pick with `Change-Id` trailers, or
   - squash into a single commit and keep or reuse `Change-Id`.
 - Optionally replace the commit message with PR title and body.
 - Push with a topic to `refs/for/<branch>` using `git-review` behavior.
+- **For UPDATE/EDIT operations**: Syncs PR metadata (title/description) to Gerrit.
 - Query Gerrit for the resulting URL, change number, and patchset SHA.
+- **Verifies patchset creation** to confirm updates vs. new changes.
 - Add a back‑reference comment in Gerrit to the GitHub PR and run URL.
 - Comment on the GitHub PR with the Gerrit change URL(s).
 - By default, the tool preserves PRs after submission; set `PRESERVE_GITHUB_PRS=false` to close them.
+
+## PR Update Handling (Dependabot Support)
+
+GitHub2Gerrit now **intelligently handles PR updates** from automation tools like Dependabot:
+
+### How PR Updates Work
+
+When a PR updates (e.g., Dependabot rebases or updates dependencies):
+
+1. **Automatic Detection**: The `synchronize` event triggers UPDATE mode
+2. **Change-ID Recovery**: Finds existing Gerrit change using four strategies:
+   - Topic-based query (`GH-owner-repo-PR#`)
+   - GitHub-Hash trailer matching
+   - GitHub-PR trailer URL matching
+   - Mapping comment parsing
+3. **Change-ID Reuse**: Forces reuse of existing Change-ID(s)
+4. **New Patchset Creation**: Pushes create a new patchset, not a new change
+5. **Metadata Sync**: Updates Gerrit change title/description if PR edits occur
+6. **Verification**: Confirms patchset creation and increment
+
+### PR Event Types
+
+| Event | Action | Behavior |
+|-------|--------|----------|
+| `opened` | CREATE | Creates new Gerrit change(s) |
+| `synchronize` | UPDATE | Updates existing change with new patchset |
+| `edited` | EDIT | Syncs metadata changes to Gerrit |
+| `reopened` | REOPEN | Treats as CREATE if no existing change |
+| `closed` | CLOSE | Handles PR closure |
+
+### Example: Dependabot Workflow
+
+```yaml
+on:
+  pull_request_target:
+    types: [opened, reopened, edited, synchronize, closed]
+```
+
+**Typical Dependabot flow:**
+
+1. **Day 1**: Dependabot opens PR #29 → GitHub2Gerrit creates Gerrit change 73940
+2. **Day 2**: Dependabot rebases PR #29 → GitHub2Gerrit updates change 73940 (new patchset 2)
+3. **Day 3**: Dependabot updates dependencies in PR #29 → change 73940 gets patchset 3
+4. **Day 4**: Someone edits PR title → metadata synced to Gerrit change 73940
+5. **Day 5**: Change 73940 merged in Gerrit → PR #29 auto-closed in GitHub
+
+### Key Features
+
+- **No Duplicate Changes**: UPDATE mode enforces existing change presence
+- **Robust Reconciliation**: Lower similarity threshold for rebased commits
+- **Metadata Synchronization**: PR title/description changes sync to Gerrit
+- **Patchset Verification**: Confirms updates create new patchsets, not new changes
+- **Clear Error Messages**: Helpful guidance when existing change not found
+
+### Error Handling
+
+If UPDATE fails to find existing change:
+
+```text
+❌ UPDATE FAILED: Cannot update non-existent Gerrit change
+💡 GitHub2Gerrit did not process PR #42.
+   To create a new change, trigger the 'opened' workflow action.
+```
 
 ## Close Merged PRs Feature
 

@@ -264,6 +264,14 @@ def isolate_git_environment(monkeypatch):
     monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
     monkeypatch.delenv("SSH_AGENT_PID", raising=False)
 
+    # Clear Git repository location variables to prevent cross-repo contamination
+    # This ensures test repos don't accidentally reference the main repo's objects
+    monkeypatch.delenv("GIT_DIR", raising=False)
+    monkeypatch.delenv("GIT_WORK_TREE", raising=False)
+    monkeypatch.delenv("GIT_INDEX_FILE", raising=False)
+    monkeypatch.delenv("GIT_OBJECT_DIRECTORY", raising=False)
+    monkeypatch.delenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", raising=False)
+
     # Set consistent git identity for all tests
     monkeypatch.setenv("GIT_AUTHOR_NAME", "Test Bot")
     monkeypatch.setenv("GIT_AUTHOR_EMAIL", "test-bot@example.org")
