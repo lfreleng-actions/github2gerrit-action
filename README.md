@@ -59,12 +59,16 @@ and syncs them back to GitHub. This completes the lifecycle for automation PRs
 
 **Gerrit change status handling:**
 
-| Scenario | `CLOSE_MERGED_PRS=true` (default) | `CLOSE_MERGED_PRS=false` |
-|----------|-----------------------------------|--------------------------|
-| Change has MERGED status | ✅ Closes PR with merged comment | ⏭️ No action |
+<!-- markdownlint-disable MD013 MD060 -->
+
+| Scenario                    | `CLOSE_MERGED_PRS=true` (default)     | `CLOSE_MERGED_PRS=false`                              |
+| --------------------------- | ------------------------------------- | ----------------------------------------------------- |
+| Change has MERGED status    | ✅ Closes PR with merged comment       | ⏭️ No action                                          |
 | Change has ABANDONED status | ✅ Closes PR with abandoned comment ⛔️ | 💬 Adds abandoned notification comment (PR stays open) |
-| Change is NEW/OPEN | ⚠️ Closes PR with a warning | ⏭️ No action |
-| Status UNKNOWN | ⚠️ Closes PR with a warning | ⏭️ No action |
+| Change is NEW/OPEN          | ⚠️ Closes PR with a warning           | ⏭️ No action                                          |
+| Status UNKNOWN              | ⚠️ Closes PR with a warning           | ⏭️ No action                                          |
+
+<!-- markdownlint-enable MD013 MD060 -->
 
 **Status reporting examples:**
 
@@ -105,9 +109,9 @@ to accept all PRs.
 
 **Recognized automation tools:**
 
-| Tool | GitHub Username(s) |
-|------|-------------------|
-| Dependabot | `dependabot[bot]`, `dependabot` |
+| Tool          | GitHub Username(s)                    |
+| ------------- | ------------------------------------- |
+| Dependabot    | `dependabot[bot]`, `dependabot`       |
 | Pre-commit.ci | `pre-commit-ci[bot]`, `pre-commit-ci` |
 
 **What happens when enabled:**
@@ -152,18 +156,22 @@ The tool rejects PRs from non-automation users by:
 The `github2gerrit` tool uses standardized exit codes for different failure types. This helps with automation,
 debugging, and providing clear feedback to users.
 
-| Exit Code | Description | Common Causes | Resolution |
-|-----------|-------------|---------------|------------|
-| **0** | Success | Operation completed | N/A |
-| **1** | General Error | Unexpected operational failure | Check logs for details |
-| **2** | Configuration Error | Missing or invalid configuration parameters | Verify required inputs and environment variables |
-| **3** | Duplicate Error | Duplicate change detected (when not allowed) | Use `--allow-duplicates` flag or check existing changes |
-| **4** | GitHub API Error | GitHub API access or permission issues | Verify `GITHUB_TOKEN` has required permissions |
-| **5** | Gerrit Connection Error | Failed to connect to Gerrit server | Check SSH keys, server configuration, and network |
-| **6** | Network Error | Network connectivity issues | Check internet connection and firewall settings |
-| **7** | Repository Error | Git repository access or operation failed | Verify repository permissions and git configuration |
-| **8** | PR State Error | Pull request in invalid state for processing | Ensure PR is open and mergeable |
-| **9** | Validation Error | Input validation failed | Check parameter values and formats |
+<!-- markdownlint-disable MD013 -->
+
+| Exit Code | Description             | Common Causes                                | Resolution                                              |
+| --------- | ----------------------- | -------------------------------------------- | ------------------------------------------------------- |
+| **0**     | Success                 | Operation completed                          | N/A                                                     |
+| **1**     | General Error           | Unexpected operational failure               | Check logs for details                                  |
+| **2**     | Configuration Error     | Missing or invalid configuration parameters  | Verify required inputs and environment variables        |
+| **3**     | Duplicate Error         | Duplicate change detected (when not allowed) | Use `--allow-duplicates` flag or check existing changes |
+| **4**     | GitHub API Error        | GitHub API access or permission issues       | Verify `GITHUB_TOKEN` has required permissions          |
+| **5**     | Gerrit Connection Error | Failed to connect to Gerrit server           | Check SSH keys, server configuration, and network       |
+| **6**     | Network Error           | Network connectivity issues                  | Check internet connection and firewall settings         |
+| **7**     | Repository Error        | Git repository access or operation failed    | Verify repository permissions and git configuration     |
+| **8**     | PR State Error          | Pull request in invalid state for processing | Ensure PR is open and mergeable                         |
+| **9**     | Validation Error        | Input validation failed                      | Check parameter values and formats                      |
+
+<!-- markdownlint-enable MD013 -->
 
 ### Common Error Messages
 
@@ -750,34 +758,38 @@ Notes:
 All inputs are strings, matching the composite action. The following table shows
 alignment between action inputs, environment variables, and CLI flags:
 
-| Action Input | Environment Variable | CLI Flag | Required | Default | Description |
-|-------------|---------------------|----------|----------|---------|-------------|
-| `SUBMIT_SINGLE_COMMITS` | `SUBMIT_SINGLE_COMMITS` | `--submit-single-commits` | No | `"false"` | Submit one commit at a time to Gerrit |
-| `USE_PR_AS_COMMIT` | `USE_PR_AS_COMMIT` | `--use-pr-as-commit` | No | `"false"` | Use PR title and body as the commit message |
-| `FETCH_DEPTH` | `FETCH_DEPTH` | `--fetch-depth` | No | `"10"` | Fetch depth for checkout |
-| `PR_NUMBER` | `PR_NUMBER` | N/A | No | `"0"` | Pull request number to process (workflow_dispatch) |
-| `GERRIT_KNOWN_HOSTS` | `GERRIT_KNOWN_HOSTS` | `--gerrit-known-hosts` | Yes | N/A | SSH known hosts entries for Gerrit |
-| `GERRIT_SSH_PRIVKEY_G2G` | `GERRIT_SSH_PRIVKEY_G2G` | `--gerrit-ssh-privkey-g2g` | Yes | N/A | SSH private key content for Gerrit authentication |
-| `GERRIT_SSH_USER_G2G` | `GERRIT_SSH_USER_G2G` | `--gerrit-ssh-user-g2g` | No¹ | `""` | Gerrit SSH username (auto-derived if enabled) |
-| `GERRIT_SSH_USER_G2G_EMAIL` | `GERRIT_SSH_USER_G2G_EMAIL` | `--gerrit-ssh-user-g2g-email` | No¹ | `""` | Email for Gerrit SSH user (auto-derived if enabled) |
-| `ORGANIZATION` | `ORGANIZATION` | `--organization` | No | `${{ github.repository_owner }}` | GitHub organization/owner |
-| `REVIEWERS_EMAIL` | `REVIEWERS_EMAIL` | `--reviewers-email` | No | `""` | Comma-separated reviewer emails |
-| `ALLOW_GHE_URLS` | `ALLOW_GHE_URLS` | `--allow-ghe-urls` | No | `"false"` | Allow GitHub Enterprise URLs in direct URL mode |
-| `PRESERVE_GITHUB_PRS` | `PRESERVE_GITHUB_PRS` | `--preserve-github-prs` | No | `"true"` | Do not close GitHub PRs after pushing to Gerrit |
-| `DRY_RUN` | `DRY_RUN` | `--dry-run` | No | `"false"` | Check settings/PR metadata; do not write to Gerrit |
-| `ALLOW_DUPLICATES` | `ALLOW_DUPLICATES` | `--allow-duplicates` | No | `"false"` | Allow submitting duplicate changes without error |
-| `CI_TESTING` | `CI_TESTING` | `--ci-testing` | No | `"false"` | Enable CI testing mode (overrides .gitreview) |
-| `ISSUE_ID` | `ISSUE_ID` | `--issue-id` | No | `""` | Issue ID to include (e.g., ABC-123) |
-| `ISSUE_ID_LOOKUP_JSON` | `ISSUE_ID_LOOKUP_JSON` | `--issue-id-lookup-json` | No | `"[]"` | JSON array mapping GitHub actors to Issue IDs (automatic lookup if ISSUE_ID not provided) |
-| `G2G_USE_SSH_AGENT` | `G2G_USE_SSH_AGENT` | N/A | No | `"true"` | Use SSH agent for authentication |
-| `DUPLICATE_TYPES` | `DUPLICATE_TYPES` | `--duplicate-types` | No | `"open"` | Comma-separated Gerrit change states to check for duplicate detection |
-| `GERRIT_SERVER` | `GERRIT_SERVER` | `--gerrit-server` | No² | `""` | Gerrit server hostname (auto-derived if enabled) |
-| `GERRIT_SERVER_PORT` | `GERRIT_SERVER_PORT` | `--gerrit-server-port` | No | `"29418"` | Gerrit SSH port |
-| `GERRIT_PROJECT` | `GERRIT_PROJECT` | `--gerrit-project` | No² | `""` | Gerrit project name |
-| `GERRIT_HTTP_BASE_PATH` | `GERRIT_HTTP_BASE_PATH` | N/A | No | `""` | HTTP base path for Gerrit REST API |
-| `GERRIT_HTTP_USER` | `GERRIT_HTTP_USER` | N/A | No | `""` | Gerrit HTTP user for REST authentication |
-| `GERRIT_HTTP_PASSWORD` | `GERRIT_HTTP_PASSWORD` | N/A | No | `""` | Gerrit HTTP password/token for REST authentication |
-| N/A | `G2G_VERBOSE` | `--verbose`, `-v` | No | `"false"` | Enable verbose debug logging |
+<!-- markdownlint-disable MD013 -->
+
+| Action Input                | Environment Variable        | CLI Flag                      | Required | Default                          | Description                                                                               |
+| --------------------------- | --------------------------- | ----------------------------- | -------- | -------------------------------- | ----------------------------------------------------------------------------------------- |
+| `SUBMIT_SINGLE_COMMITS`     | `SUBMIT_SINGLE_COMMITS`     | `--submit-single-commits`     | No       | `"false"`                        | Submit one commit at a time to Gerrit                                                     |
+| `USE_PR_AS_COMMIT`          | `USE_PR_AS_COMMIT`          | `--use-pr-as-commit`          | No       | `"false"`                        | Use PR title and body as the commit message                                               |
+| `FETCH_DEPTH`               | `FETCH_DEPTH`               | `--fetch-depth`               | No       | `"10"`                           | Fetch depth for checkout                                                                  |
+| `PR_NUMBER`                 | `PR_NUMBER`                 | N/A                           | No       | `"0"`                            | Pull request number to process (workflow_dispatch)                                        |
+| `GERRIT_KNOWN_HOSTS`        | `GERRIT_KNOWN_HOSTS`        | `--gerrit-known-hosts`        | Yes      | N/A                              | SSH known hosts entries for Gerrit                                                        |
+| `GERRIT_SSH_PRIVKEY_G2G`    | `GERRIT_SSH_PRIVKEY_G2G`    | `--gerrit-ssh-privkey-g2g`    | Yes      | N/A                              | SSH private key content for Gerrit authentication                                         |
+| `GERRIT_SSH_USER_G2G`       | `GERRIT_SSH_USER_G2G`       | `--gerrit-ssh-user-g2g`       | No¹      | `""`                             | Gerrit SSH username (auto-derived if enabled)                                             |
+| `GERRIT_SSH_USER_G2G_EMAIL` | `GERRIT_SSH_USER_G2G_EMAIL` | `--gerrit-ssh-user-g2g-email` | No¹      | `""`                             | Email for Gerrit SSH user (auto-derived if enabled)                                       |
+| `ORGANIZATION`              | `ORGANIZATION`              | `--organization`              | No       | `${{ github.repository_owner }}` | GitHub organization/owner                                                                 |
+| `REVIEWERS_EMAIL`           | `REVIEWERS_EMAIL`           | `--reviewers-email`           | No       | `""`                             | Comma-separated reviewer emails                                                           |
+| `ALLOW_GHE_URLS`            | `ALLOW_GHE_URLS`            | `--allow-ghe-urls`            | No       | `"false"`                        | Allow GitHub Enterprise URLs in direct URL mode                                           |
+| `PRESERVE_GITHUB_PRS`       | `PRESERVE_GITHUB_PRS`       | `--preserve-github-prs`       | No       | `"true"`                         | Do not close GitHub PRs after pushing to Gerrit                                           |
+| `DRY_RUN`                   | `DRY_RUN`                   | `--dry-run`                   | No       | `"false"`                        | Check settings/PR metadata; do not write to Gerrit                                        |
+| `ALLOW_DUPLICATES`          | `ALLOW_DUPLICATES`          | `--allow-duplicates`          | No       | `"false"`                        | Allow submitting duplicate changes without error                                          |
+| `CI_TESTING`                | `CI_TESTING`                | `--ci-testing`                | No       | `"false"`                        | Enable CI testing mode (overrides .gitreview)                                             |
+| `ISSUE_ID`                  | `ISSUE_ID`                  | `--issue-id`                  | No       | `""`                             | Issue ID to include (e.g., ABC-123)                                                       |
+| `ISSUE_ID_LOOKUP_JSON`      | `ISSUE_ID_LOOKUP_JSON`      | `--issue-id-lookup-json`      | No       | `"[]"`                           | JSON array mapping GitHub actors to Issue IDs (automatic lookup if ISSUE_ID not provided) |
+| `G2G_USE_SSH_AGENT`         | `G2G_USE_SSH_AGENT`         | N/A                           | No       | `"true"`                         | Use SSH agent for authentication                                                          |
+| `DUPLICATE_TYPES`           | `DUPLICATE_TYPES`           | `--duplicate-types`           | No       | `"open"`                         | Comma-separated Gerrit change states to check for duplicate detection                     |
+| `GERRIT_SERVER`             | `GERRIT_SERVER`             | `--gerrit-server`             | No²      | `""`                             | Gerrit server hostname (auto-derived if enabled)                                          |
+| `GERRIT_SERVER_PORT`        | `GERRIT_SERVER_PORT`        | `--gerrit-server-port`        | No       | `"29418"`                        | Gerrit SSH port                                                                           |
+| `GERRIT_PROJECT`            | `GERRIT_PROJECT`            | `--gerrit-project`            | No²      | `""`                             | Gerrit project name                                                                       |
+| `GERRIT_HTTP_BASE_PATH`     | `GERRIT_HTTP_BASE_PATH`     | N/A                           | No       | `""`                             | HTTP base path for Gerrit REST API                                                        |
+| `GERRIT_HTTP_USER`          | `GERRIT_HTTP_USER`          | N/A                           | No       | `""`                             | Gerrit HTTP user for REST authentication                                                  |
+| `GERRIT_HTTP_PASSWORD`      | `GERRIT_HTTP_PASSWORD`      | N/A                           | No       | `""`                             | Gerrit HTTP password/token for REST authentication                                        |
+| N/A                         | `G2G_VERBOSE`               | `--verbose`, `-v`             | No       | `"false"`                        | Enable verbose debug logging                                                              |
+
+<!-- markdownlint-enable MD013 -->
 
 **Notes:**
 
@@ -792,31 +804,39 @@ The format required for the JSON Issue-ID lookup is:
 
 The following environment variables control internal behavior but are not action inputs:
 
-| Environment Variable | Description | Default |
-|---------------------|-------------|---------|
-| `G2G_LOG_LEVEL` | Logging level (DEBUG, INFO, WARNING, ERROR) | `"INFO"` |
-| `G2G_ENABLE_DERIVATION` | Enable auto-derivation of Gerrit parameters | `"true"` |
-| `G2G_CONFIG_PATH` | Path to organization configuration file | `~/.config/github2gerrit/config.ini` |
-| `G2G_AUTO_SAVE_CONFIG` | Auto-save derived parameters to config | `"false"` (GitHub Actions), `"true"` (CLI) |
-| `G2G_TARGET_URL` | Internal flag for direct URL mode | Set automatically |
-| `G2G_TMP_BRANCH` | Temporary branch name for single commits | `"tmp_branch"` |
-| `G2G_TOPIC_PREFIX` | Prefix for Gerrit topic names | `"GH"` |
-| `G2G_SKIP_GERRIT_COMMENTS` | Skip posting back-reference comments in Gerrit | `"false"` |
-| `G2G_DRYRUN_DISABLE_NETWORK` | Disable network calls in dry-run mode | `"false"` |
-| `SYNC_ALL_OPEN_PRS` | Process all open PRs (set automatically) | Set automatically |
-| `GERRIT_BRANCH` | Override target branch for Gerrit | Uses `GITHUB_BASE_REF` |
-| `GITHUB_TOKEN` | GitHub API token | Provided by GitHub Actions |
-| `GITHUB_*` context | GitHub Actions context variables | Provided by GitHub Actions |
+<!-- markdownlint-disable MD013 -->
+
+| Environment Variable         | Description                                    | Default                                    |
+| ---------------------------- | ---------------------------------------------- | ------------------------------------------ |
+| `G2G_LOG_LEVEL`              | Logging level (DEBUG, INFO, WARNING, ERROR)    | `"INFO"`                                   |
+| `G2G_ENABLE_DERIVATION`      | Enable auto-derivation of Gerrit parameters    | `"true"`                                   |
+| `G2G_CONFIG_PATH`            | Path to organization configuration file        | `~/.config/github2gerrit/config.ini`       |
+| `G2G_AUTO_SAVE_CONFIG`       | Auto-save derived parameters to config         | `"false"` (GitHub Actions), `"true"` (CLI) |
+| `G2G_TARGET_URL`             | Internal flag for direct URL mode              | Set automatically                          |
+| `G2G_TMP_BRANCH`             | Temporary branch name for single commits       | `"tmp_branch"`                             |
+| `G2G_TOPIC_PREFIX`           | Prefix for Gerrit topic names                  | `"GH"`                                     |
+| `G2G_SKIP_GERRIT_COMMENTS`   | Skip posting back-reference comments in Gerrit | `"false"`                                  |
+| `G2G_DRYRUN_DISABLE_NETWORK` | Disable network calls in dry-run mode          | `"false"`                                  |
+| `SYNC_ALL_OPEN_PRS`          | Process all open PRs (set automatically)       | Set automatically                          |
+| `GERRIT_BRANCH`              | Override target branch for Gerrit              | Uses `GITHUB_BASE_REF`                     |
+| `GITHUB_TOKEN`               | GitHub API token                               | Provided by GitHub Actions                 |
+| `GITHUB_*` context           | GitHub Actions context variables               | Provided by GitHub Actions                 |
+
+<!-- markdownlint-enable MD013 -->
 
 ## Outputs
 
 The action provides the following outputs for use in later workflow steps:
 
-| Output Name | Description | Environment Variable |
-|-------------|-------------|---------------------|
-| `gerrit_change_request_url` | Gerrit change URL(s) (newline-separated) | `GERRIT_CHANGE_REQUEST_URL` |
+<!-- markdownlint-disable MD013 -->
+
+| Output Name                 | Description                                 | Environment Variable        |
+| --------------------------- | ------------------------------------------- | --------------------------- |
+| `gerrit_change_request_url` | Gerrit change URL(s) (newline-separated)    | `GERRIT_CHANGE_REQUEST_URL` |
 | `gerrit_change_request_num` | Gerrit change number(s) (newline-separated) | `GERRIT_CHANGE_REQUEST_NUM` |
-| `gerrit_commit_sha` | Patch set commit SHA(s) (newline-separated) | `GERRIT_COMMIT_SHA` |
+| `gerrit_commit_sha`         | Patch set commit SHA(s) (newline-separated) | `GERRIT_COMMIT_SHA`         |
+
+<!-- markdownlint-enable MD013 -->
 
 These outputs export automatically as environment variables and are accessible in
 later workflow steps using `${{ steps.<step-id>.outputs.<output-name> }}` syntax.

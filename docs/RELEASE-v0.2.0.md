@@ -394,11 +394,15 @@ if os.getenv("G2G_TARGET_URL"):  # Works with any non-empty string
 
 ## Behavior Summary Table
 
-| Feature | v0.1.x Default | v0.2.0 Default | Notes |
-|---------|----------------|----------------|-------|
-| `PRESERVE_GITHUB_PRS` | `"false"` | `"true"` | **BREAKING CHANGE** |
-| `CLOSE_MERGED_PRS` | `"true"` | `"true"` | No change |
-| Push event handling | Basic | Enhanced | Better state management |
+<!-- markdownlint-disable MD013 -->
+
+| Feature               | v0.1.x Default | v0.2.0 Default | Notes                   |
+| --------------------- | -------------- | -------------- | ----------------------- |
+| `PRESERVE_GITHUB_PRS` | `"false"`      | `"true"`       | **BREAKING CHANGE**     |
+| `CLOSE_MERGED_PRS`    | `"true"`       | `"true"`       | No change               |
+| Push event handling   | Basic          | Enhanced       | Better state management |
+
+<!-- markdownlint-enable MD013 -->
 
 ## Recommended Workflow Patterns
 
