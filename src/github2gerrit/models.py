@@ -10,10 +10,22 @@ core orchestrator by providing the common dataclasses used across both.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 
 
-__all__ = ["GitHubContext", "Inputs"]
+__all__ = ["GitHubContext", "Inputs", "PROperationMode"]
+
+
+class PROperationMode(Enum):
+    """Represents the type of operation being performed on a PR."""
+
+    CREATE = "create"  # New PR (opened event)
+    UPDATE = "update"  # PR updated (synchronize event - rebase, new commits)
+    EDIT = "edit"  # PR metadata edited (edited event - title/description)
+    REOPEN = "reopen"  # PR reopened (reopened event)
+    CLOSE = "close"  # PR closed (closed event)
+    UNKNOWN = "unknown"  # Unknown or not applicable
 
 
 @dataclass(frozen=True)
@@ -98,5 +110,25 @@ class GitHubContext:
 
     base_ref: str
     head_ref: str
+
+    def get_operation_mode(self) -> PROperationMode:
+        """Determine the operation mode based on event type and action.
+
+        Returns:
+            PROperationMode enum indicating the type of operation
+        """
+        if self.event_name != "pull_request_target":
+            return PROperationMode.UNKNOWN
+
+        action = self.event_action.lower() if self.event_action else ""
+
+        action_map = {
+            "opened": PROperationMode.CREATE,
+            "synchronize": PROperationMode.UPDATE,
+            "edited": PROperationMode.EDIT,
+            "reopened": PROperationMode.REOPEN,
+            "closed": PROperationMode.CLOSE,
+        }
+        return action_map.get(action, PROperationMode.UNKNOWN)
 
     pr_number: int | None
