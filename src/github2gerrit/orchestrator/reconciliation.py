@@ -74,6 +74,7 @@ def perform_reconciliation(
     *,
     expected_pr_url: str | None = None,
     expected_github_hash: str | None = None,
+    is_update_operation: bool = False,
 ) -> list[str]:
     """
     Build and apply a reconciliation plan (Phase 2).
@@ -89,6 +90,7 @@ def perform_reconciliation(
       local_commits: Ordered local commits (topological).
       expected_pr_url: Optional authoritative PR URL.
       expected_github_hash: Optional expected GitHub-Hash trailer.
+      is_update_operation: True if this is a PR update (synchronize event).
 
     Returns:
       Ordered list of Change-Ids (plan.mapping_order).
@@ -106,11 +108,30 @@ def perform_reconciliation(
     if expected_pr_url is None:
         expected_pr_url = f"{gh.server_url}/{gh.repository}/pull/{gh.pr_number}"
 
+    # For UPDATE operations, use lower similarity threshold for rebased commits
+    similarity_threshold = getattr(inputs, "similarity_subject", 0.7)
+    if is_update_operation:
+        # Apply percentage-based reduction for updates - commit messages may
+        # have changed slightly due to rebasing or amendments
+        update_factor = getattr(inputs, "similarity_update_factor", 0.75)
+        # Ensure factor is in valid range [0.0, 1.0]
+        update_factor = max(0.0, min(1.0, update_factor))
+        # Apply multiplier with floor at 0.5 to prevent too-loose matching
+        similarity_threshold = max(0.5, similarity_threshold * update_factor)
+        log.info(
+            "UPDATE operation detected - using relaxed similarity "
+            "threshold: %.2f (base=%.2f, factor=%.2f)",
+            similarity_threshold,
+            getattr(inputs, "similarity_subject", 0.7),
+            update_factor,
+        )
+
     log.debug(
-        "Recon strategy=%s commits=%d pr=%s",
+        "Recon strategy=%s commits=%d pr=%s update=%s",
         strategy,
         len(local_commits),
         expected_pr_url,
+        is_update_operation,
     )
 
     # 1. Topic discovery
@@ -150,9 +171,17 @@ def perform_reconciliation(
 
     # 3. Matcher path
     if gerrit_changes:
+        # Use adjusted similarity threshold for UPDATE operations
+        effective_threshold = (
+            similarity_threshold
+            if is_update_operation
+            else getattr(inputs, "similarity_subject", 0.7)
+        )
+
         matcher = ReconciliationMatcher(
-            similarity_threshold=getattr(inputs, "similarity_subject", 0.7),
+            similarity_threshold=effective_threshold,
             allow_duplicate_subjects=True,
+            require_file_match=getattr(inputs, "similarity_files", True),
         )
         result = matcher.reconcile(local_commits, gerrit_changes)
         ordered = result.change_ids

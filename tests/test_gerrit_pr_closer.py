@@ -489,11 +489,12 @@ class TestAbandonedChangeHandling:
         url = "https://gerrit.example.org/c/project/+/12345"
         comment = _build_abandoned_comment(url)
 
-        assert "Gerrit Change Abandoned" in comment
-        assert "🏳️" in comment
+        assert "Automated PR Closure" in comment
+        assert "⛔️" in comment
         assert "abandoned" in comment
+        assert "rejected" in comment
         assert url in comment
-        assert "CLOSE_MERGED_PRS" in comment
+        assert "NOT part of the main codebase" in comment
 
     def test_build_abandoned_comment_without_url(self):
         """Test building abandoned comment without Gerrit URL."""
@@ -501,10 +502,11 @@ class TestAbandonedChangeHandling:
 
         comment = _build_abandoned_comment(None)
 
-        assert "Gerrit Change Abandoned" in comment
-        assert "🏳️" in comment
+        assert "Automated PR Closure" in comment
+        assert "⛔️" in comment
         assert "abandoned" in comment
-        assert "CLOSE_MERGED_PRS" in comment
+        assert "rejected" in comment
+        assert "NOT part of the main codebase" in comment
 
     def test_build_abandoned_notification_comment_with_url(self):
         """Test building abandoned notification comment with Gerrit URL."""
@@ -578,7 +580,8 @@ class TestAbandonedChangeHandling:
         call_args = mock_close_pr.call_args
         comment = call_args[1]["comment"]
         assert "abandoned" in comment.lower()
-        assert "🏳️" in comment
+        assert "rejected" in comment.lower()
+        assert "⛔️" in comment
 
     @patch("github2gerrit.gerrit_pr_closer.check_gerrit_change_status")
     @patch("github2gerrit.gerrit_pr_closer.extract_pr_url_from_commit")

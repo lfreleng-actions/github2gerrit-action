@@ -11,6 +11,7 @@ from github2gerrit.pr_content_filter import PrecommitConfig
 from github2gerrit.pr_content_filter import PrecommitRule
 from github2gerrit.pr_content_filter import create_default_filter
 from github2gerrit.pr_content_filter import filter_pr_body
+from github2gerrit.pr_content_filter import sanitize_gerrit_comment
 from github2gerrit.pr_content_filter import should_filter_pr_body
 
 
@@ -44,6 +45,95 @@ class TestFilterConfig:
         config = PrecommitConfig()
 
         assert config.enabled is True
+
+
+class TestSanitizeGerritComment:
+    """Test sanitize_gerrit_comment function."""
+
+    def test_plain_text(self) -> None:
+        """Plain text should pass through unchanged."""
+        result = sanitize_gerrit_comment("Plain text comment")
+        assert result == "Plain text comment"
+
+    def test_html_tags_removed(self) -> None:
+        """HTML tags should be removed."""
+        result = sanitize_gerrit_comment("<p>This is <b>bold</b> text</p>")
+        assert result == "This is bold text"
+
+    def test_markdown_links_simplified(self) -> None:
+        """Markdown links should be converted to plain text."""
+        result = sanitize_gerrit_comment(
+            "Check [this link](https://example.com)"
+        )
+        assert result == "Check this link"
+
+    def test_emoji_codes_removed(self) -> None:
+        """GitHub emoji codes should be removed."""
+        result = sanitize_gerrit_comment("Great work! :sparkles: :tada:")
+        assert result == "Great work!"
+
+    def test_dangerous_html_removed(self) -> None:
+        """Potentially malicious HTML should be completely removed."""
+        # Script tags
+        result = sanitize_gerrit_comment(
+            '<script>alert("xss")</script>Safe text'
+        )
+        assert result == "Safe text"
+
+        # Style tags
+        result = sanitize_gerrit_comment(
+            "<style>body{display:none}</style>Text"
+        )
+        assert result == "Text"
+
+        # Iframe tags
+        result = sanitize_gerrit_comment('<iframe src="evil.com"></iframe>Safe')
+        assert result == "Safe"
+
+    def test_whitespace_normalized(self) -> None:
+        """Excessive whitespace should be normalized."""
+        result = sanitize_gerrit_comment(
+            "Too    many   spaces\n\n\n\nAnd newlines"
+        )
+        assert result == "Too many spaces\n\nAnd newlines"
+
+    def test_real_world_comment(self) -> None:
+        """Test with a realistic GitHub PR comment."""
+        comment = """Thanks for the PR! :thumbsup:
+
+I've reviewed the changes and they look good.
+
+**Changes:**
+- Fixed [bug #123](https://github.com/org/repo/issues/123)
+- Updated <code>config.py</code>
+
+Let's merge this! :rocket:"""
+
+        expected = """Thanks for the PR!
+
+I've reviewed the changes and they look good.
+
+**Changes:**
+- Fixed bug #123
+- Updated config.py
+
+Let's merge this!"""
+
+        result = sanitize_gerrit_comment(comment)
+        assert result == expected
+
+    def test_empty_input(self) -> None:
+        """Empty or None input should return empty string."""
+        assert sanitize_gerrit_comment(None) == ""
+        assert sanitize_gerrit_comment("") == ""
+        assert sanitize_gerrit_comment("   ") == ""
+
+    def test_mixed_formatting(self) -> None:
+        """Test with mixed HTML, markdown, and emoji."""
+        comment = "<h3>:bug: Bug Fix</h3>\n\nThis fixes [issue #123](http://example.com/issue/123)"
+        expected = "Bug Fix\n\nThis fixes issue #123"
+        result = sanitize_gerrit_comment(comment)
+        assert result == expected
 
 
 class TestDependabotRule:

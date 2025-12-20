@@ -32,7 +32,12 @@ class _DummyOrchestratorSingle:
     def __init__(self, workspace: Any) -> None:
         self.workspace = workspace
 
-    def execute(self, *, inputs: Any, gh: Any) -> Any:
+    def _prepare_workspace_checkout(self, *, inputs: Any, gh: Any) -> None:
+        """Mock workspace checkout - does nothing."""
+
+    def execute(
+        self, *, inputs: Any, gh: Any, operation_mode: str | None = None
+    ) -> Any:
         # Simulate the orchestrator also exporting commit sha(s) in the
         # environment
         # so the CLI writes them to $GITHUB_OUTPUT.
@@ -50,7 +55,12 @@ class _DummyOrchestratorMulti:
     def __init__(self, workspace: Any) -> None:
         self.workspace = workspace
 
-    def execute(self, *, inputs: Any, gh: Any) -> Any:
+    def _prepare_workspace_checkout(self, *, inputs: Any, gh: Any) -> None:
+        """Mock workspace checkout - does nothing."""
+
+    def execute(
+        self, *, inputs: Any, gh: Any, operation_mode: str | None = None
+    ) -> Any:
         # For multi-PR path we only need urls/nums to be aggregated
         # The CLI only writes commit_sha if present in env; we omit it here.
         return _DummyResult(

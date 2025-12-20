@@ -8,6 +8,7 @@ from __future__ import annotations
 from unittest.mock import patch
 
 import pytest
+import typer
 
 from github2gerrit.error_codes import ERROR_MESSAGES
 from github2gerrit.error_codes import ExitCode
@@ -52,26 +53,26 @@ class TestExitWithError:
 
     def test_exit_with_error_uses_default_message(self):
         """Test exit_with_error uses default message for exit code."""
-        with pytest.raises(SystemExit) as exc_info:
+        with pytest.raises(typer.Exit) as exc_info:
             exit_with_error(ExitCode.GITHUB_API_ERROR)
 
-        assert exc_info.value.code == 4
+        assert exc_info.value.exit_code == 4
 
     def test_exit_with_error_uses_custom_message(self):
         """Test exit_with_error uses custom message when provided."""
         custom_msg = "Custom error message"
 
-        with pytest.raises(SystemExit) as exc_info:
+        with pytest.raises(typer.Exit) as exc_info:
             exit_with_error(ExitCode.CONFIGURATION_ERROR, message=custom_msg)
 
-        assert exc_info.value.code == 2
+        assert exc_info.value.exit_code == 2
 
     @patch("github2gerrit.error_codes.log")
     def test_exit_with_error_logs_exception(self, mock_log):
         """Test exit_with_error logs exception details."""
         test_exception = ValueError("Test error")
 
-        with pytest.raises(SystemExit):
+        with pytest.raises(typer.Exit):
             exit_with_error(
                 ExitCode.GENERAL_ERROR,
                 message="Test message",
@@ -87,45 +88,45 @@ class TestSpecificExitFunctions:
 
     def test_exit_for_github_api_error(self):
         """Test GitHub API error exit function."""
-        with pytest.raises(SystemExit) as exc_info:
+        with pytest.raises(typer.Exit) as exc_info:
             exit_for_github_api_error()
 
-        assert exc_info.value.code == ExitCode.GITHUB_API_ERROR
+        assert exc_info.value.exit_code == ExitCode.GITHUB_API_ERROR
 
     def test_exit_for_gerrit_connection_error(self):
         """Test Gerrit connection error exit function."""
-        with pytest.raises(SystemExit) as exc_info:
+        with pytest.raises(typer.Exit) as exc_info:
             exit_for_gerrit_connection_error()
 
-        assert exc_info.value.code == ExitCode.GERRIT_CONNECTION_ERROR
+        assert exc_info.value.exit_code == ExitCode.GERRIT_CONNECTION_ERROR
 
     def test_exit_for_configuration_error(self):
         """Test configuration error exit function."""
-        with pytest.raises(SystemExit) as exc_info:
+        with pytest.raises(typer.Exit) as exc_info:
             exit_for_configuration_error()
 
-        assert exc_info.value.code == ExitCode.CONFIGURATION_ERROR
+        assert exc_info.value.exit_code == ExitCode.CONFIGURATION_ERROR
 
     def test_exit_for_pr_state_error(self):
         """Test PR state error exit function."""
-        with pytest.raises(SystemExit) as exc_info:
+        with pytest.raises(typer.Exit) as exc_info:
             exit_for_pr_state_error(123, "closed")
 
-        assert exc_info.value.code == ExitCode.PR_STATE_ERROR
+        assert exc_info.value.exit_code == ExitCode.PR_STATE_ERROR
 
     def test_exit_for_pr_not_found(self):
         """Test PR not found error exit function."""
-        with pytest.raises(SystemExit) as exc_info:
+        with pytest.raises(typer.Exit) as exc_info:
             exit_for_pr_not_found(123, "owner/repo")
 
-        assert exc_info.value.code == ExitCode.GITHUB_API_ERROR
+        assert exc_info.value.exit_code == ExitCode.GITHUB_API_ERROR
 
     def test_exit_for_duplicate_error(self):
         """Test duplicate error exit function."""
-        with pytest.raises(SystemExit) as exc_info:
+        with pytest.raises(typer.Exit) as exc_info:
             exit_for_duplicate_error()
 
-        assert exc_info.value.code == ExitCode.DUPLICATE_ERROR
+        assert exc_info.value.exit_code == ExitCode.DUPLICATE_ERROR
 
 
 class TestErrorDetectionFunctions:
@@ -248,7 +249,7 @@ class TestRealWorldErrorScenarios:
     @patch("github2gerrit.error_codes.safe_console_print")
     def test_error_display_formatting(self, mock_console_print):
         """Test that errors are displayed with proper formatting."""
-        with pytest.raises(SystemExit):
+        with pytest.raises(typer.Exit):
             exit_with_error(
                 ExitCode.GITHUB_API_ERROR,
                 details="Additional context information",

@@ -20,19 +20,86 @@ Gerrit `Change-Id` trailers to create or update changes.
 ## How it works (high level)
 
 - Discover pull request context and inputs.
+- **Detects PR operation mode** (CREATE, UPDATE, EDIT) based on event type.
 - Detects and prevents tool runs from creating duplicate changes.
 - Reads `.gitreview` for Gerrit host, port, and project.
 - When run locally, will pull `.gitreview` from the remote repository.
 - Sets up `git` user config and SSH for Gerrit.
+- **For UPDATE operations**: Finds and reuses existing Gerrit Change-IDs.
 - Prepare commits:
   - one‑by‑one cherry‑pick with `Change-Id` trailers, or
   - squash into a single commit and keep or reuse `Change-Id`.
 - Optionally replace the commit message with PR title and body.
 - Push with a topic to `refs/for/<branch>` using `git-review` behavior.
+- **For UPDATE/EDIT operations**: Syncs PR metadata (title/description) to Gerrit.
 - Query Gerrit for the resulting URL, change number, and patchset SHA.
+- **Verifies patchset creation** to confirm updates vs. new changes.
 - Add a back‑reference comment in Gerrit to the GitHub PR and run URL.
 - Comment on the GitHub PR with the Gerrit change URL(s).
 - By default, the tool preserves PRs after submission; set `PRESERVE_GITHUB_PRS=false` to close them.
+
+## PR Update Handling (Dependabot Support)
+
+GitHub2Gerrit now **intelligently handles PR updates** from automation tools like Dependabot:
+
+### How PR Updates Work
+
+When a PR updates (e.g., Dependabot rebases or updates dependencies):
+
+1. **Automatic Detection**: The `synchronize` event triggers UPDATE mode
+2. **Change-ID Recovery**: Finds existing Gerrit change using four strategies:
+   - Topic-based query (`GH-owner-repo-PR#`)
+   - GitHub-Hash trailer matching
+   - GitHub-PR trailer URL matching
+   - Mapping comment parsing
+3. **Change-ID Reuse**: Forces reuse of existing Change-ID(s)
+4. **New Patchset Creation**: Pushes create a new patchset, not a new change
+5. **Metadata Sync**: Updates Gerrit change title/description if PR edits occur
+6. **Verification**: Confirms patchset creation and increment
+
+### PR Event Types
+
+| Event         | Action | Behavior                                  |
+| ------------- | ------ | ----------------------------------------- |
+| `opened`      | CREATE | Creates new Gerrit change(s)              |
+| `synchronize` | UPDATE | Updates existing change with new patchset |
+| `edited`      | EDIT   | Syncs metadata changes to Gerrit          |
+| `reopened`    | REOPEN | Treats as CREATE if no existing change    |
+| `closed`      | CLOSE  | Handles PR closure                        |
+
+### Example: Dependabot Workflow
+
+```yaml
+on:
+  pull_request_target:
+    types: [opened, reopened, edited, synchronize, closed]
+```
+
+**Typical Dependabot flow:**
+
+1. **Day 1**: Dependabot opens PR #29 → GitHub2Gerrit creates Gerrit change 73940
+2. **Day 2**: Dependabot rebases PR #29 → GitHub2Gerrit updates change 73940 (new patchset 2)
+3. **Day 3**: Dependabot updates dependencies in PR #29 → change 73940 gets patchset 3
+4. **Day 4**: Someone edits PR title → metadata synced to Gerrit change 73940
+5. **Day 5**: Change 73940 merged in Gerrit → PR #29 auto-closed in GitHub
+
+### Key Features
+
+- **No Duplicate Changes**: UPDATE mode enforces existing change presence
+- **Robust Reconciliation**: Configurable similarity matching with dynamic threshold changes for PR updates
+- **Metadata Synchronization**: PR title/description changes sync to Gerrit
+- **Patchset Verification**: Confirms updates create new patchsets, not new changes
+- **Clear Error Messages**: Helpful guidance when existing change not found
+
+### Error Handling
+
+If UPDATE fails to find existing change:
+
+```text
+❌ UPDATE FAILED: Cannot update non-existent Gerrit change
+💡 GitHub2Gerrit did not process PR #42.
+   To create a new change, trigger the 'opened' workflow action.
+```
 
 ## Close Merged PRs Feature
 
@@ -450,6 +517,130 @@ else
 fi
 ```
 
+## Change-ID Reconciliation
+
+The action includes an intelligent reconciliation system that reuses existing
+Gerrit Change-IDs when updating pull requests. This prevents creating
+duplicate changes in Gerrit when developers rebase, add commits, or amend a PR.
+
+### How It Works
+
+When developers update a PR (e.g., via `synchronize` event), the reconciliation system:
+
+1. **Queries existing Gerrit changes** using the PR's topic (or falls back to GitHub comments)
+2. **Matches local commits** to existing changes using these strategies:
+   - **Trailer matching**: Reuses Change-IDs already present in commit messages
+   - **Exact subject matching**: Matches commits with identical subjects
+   - **File signature matching**: Matches commits with identical file changes
+   - **Subject similarity matching**: Uses Jaccard similarity on commit subjects
+3. **Generates new Change-IDs** for commits that don't match any existing change
+
+### Configuration
+
+The reconciliation behavior can be fine-tuned with these parameters:
+
+**`REUSE_STRATEGY`** (default: `topic+comment`)
+
+- `topic`: Query Gerrit changes by topic
+- `comment`: Search GitHub PR comments for Change-IDs
+- `topic+comment`: Try topic first, fall back to comments
+- `none`: Disable reconciliation (always generate new Change-IDs)
+
+**`SIMILARITY_SUBJECT`** (default: `0.7`)
+
+- Jaccard similarity threshold (0.0-1.0) for subject matching
+- Higher values require more similarity between commit subjects
+- Example: `0.7` means 70% of words must match
+
+**`SIMILARITY_UPDATE_FACTOR`** (default: `0.75`)
+
+- Multiplier applied to similarity threshold for UPDATE operations
+- Allows more lenient matching for rebased/amended commits
+- Applied as: `update_threshold = max(0.5, base_threshold × factor)`
+- Example: With base `0.7` and factor `0.75`, UPDATE threshold becomes `0.525`
+- Floor threshold of `0.5` prevents too-loose matching
+
+**`SIMILARITY_FILES`** (default: `false`)
+
+- Whether to require exact file signature match during reconciliation (Pass C)
+- When `true`: Commits must touch the exact same set of files to match (strict mode)
+- When `false` (recommended): Skips file signature matching, relies on subject matching
+- **Why default is `false`**: File signature matching is too strict for common workflows:
+  - Developers add/remove files during PR updates
+  - Rebasing shifts file changes between commits
+  - Conflict resolution changes which files a commit touches
+  - Developers amend commits with more file changes
+- **When to use `true`**: Enable this for controlled workflows where file sets never change
+
+**`ALLOW_ORPHAN_CHANGES`** (default: `false`)
+
+- When enabled, unmatched Gerrit changes don't generate warnings
+- Useful when you expect to remove changes from the topic
+
+### Why Adjustable Similarity?
+
+PR updates often involve rebasing, which can change commit messages slightly
+(e.g., updating references, fixing typos, or resolving conflicts). The
+`SIMILARITY_UPDATE_FACTOR` allows the system to recognize these as the same
+logical change despite minor message differences:
+
+- **Base threshold** (`SIMILARITY_SUBJECT`): Used for initial PR creation
+- **Update threshold** (base × factor): Used for PR synchronize events
+- **Percentage-based**: Scales consistently across different base thresholds
+- **Floor at 0.5**: Prevents matching unrelated commits
+
+### Example Configurations
+
+```bash
+# Strict matching - require 90% similarity, minor relaxation on updates
+SIMILARITY_SUBJECT=0.9
+SIMILARITY_UPDATE_FACTOR=0.85
+
+# Lenient matching - allow more variation in commit messages
+SIMILARITY_SUBJECT=0.6
+SIMILARITY_UPDATE_FACTOR=0.7
+
+# Recommended: Flexible matching for most workflows (default settings)
+SIMILARITY_SUBJECT=0.7
+SIMILARITY_UPDATE_FACTOR=0.75
+SIMILARITY_FILES=false  # default - allows file changes in PR updates
+
+# Strict matching - use for controlled workflows
+SIMILARITY_SUBJECT=0.9
+SIMILARITY_UPDATE_FACTOR=0.85
+SIMILARITY_FILES=true  # requires exact file matches
+
+# Disable reconciliation (always create new Change-IDs)
+REUSE_STRATEGY=none
+```
+
+### Common Pitfalls
+
+**File signature matching can break reconciliation during normal workflows:**
+
+### GitHub Actions Example
+
+```yaml
+- uses: lfreleng-actions/github2gerrit-action@main
+  with:
+    GERRIT_KNOWN_HOSTS: ${{ secrets.GERRIT_KNOWN_HOSTS }}
+    GERRIT_SSH_PRIVKEY_G2G: ${{ secrets.GERRIT_SSH_PRIVKEY_G2G }}
+    SIMILARITY_SUBJECT: '0.75'
+    SIMILARITY_UPDATE_FACTOR: '0.8'
+    # SIMILARITY_FILES defaults to 'false' - uncomment to enable strict mode
+    # SIMILARITY_FILES: 'true'
+```
+
+### CLI Example
+
+```bash
+# Custom similarity settings
+github2gerrit \
+  --similarity-subject 0.75 \
+  --similarity-update-factor 0.8 \
+  https://github.com/owner/repo/pull/123
+```
+
 ## Usage
 
 This action runs as part of a workflow that triggers on
@@ -781,6 +972,11 @@ alignment between action inputs, environment variables, and CLI flags:
 | `ISSUE_ID_LOOKUP_JSON`      | `ISSUE_ID_LOOKUP_JSON`      | `--issue-id-lookup-json`      | No       | `"[]"`                           | JSON array mapping GitHub actors to Issue IDs (automatic lookup if ISSUE_ID not provided) |
 | `G2G_USE_SSH_AGENT`         | `G2G_USE_SSH_AGENT`         | N/A                           | No       | `"true"`                         | Use SSH agent for authentication                                                          |
 | `DUPLICATE_TYPES`           | `DUPLICATE_TYPES`           | `--duplicate-types`           | No       | `"open"`                         | Comma-separated Gerrit change states to check for duplicate detection                     |
+| `REUSE_STRATEGY`            | `REUSE_STRATEGY`            | `--reuse-strategy`            | No       | `"topic+comment"`                | Change-ID reuse strategy: `topic`, `comment`, `topic+comment`, or `none`                  |
+| `SIMILARITY_SUBJECT`        | `SIMILARITY_SUBJECT`        | `--similarity-subject`        | No       | `"0.7"`                          | Jaccard similarity threshold (0.0-1.0) for subject matching during reconciliation         |
+| `SIMILARITY_UPDATE_FACTOR`  | `SIMILARITY_UPDATE_FACTOR`  | `--similarity-update-factor`  | No       | `"0.75"`                         | Multiplier (0.0-1.0) for similarity threshold on PR UPDATE operations (rebases/amendments)|
+| `SIMILARITY_FILES`          | `SIMILARITY_FILES`          | `--similarity-files`          | No       | `"false"`                        | Require exact file signature match for reconciliation (strict mode)                       |
+| `ALLOW_ORPHAN_CHANGES`      | `ALLOW_ORPHAN_CHANGES`      | `--allow-orphan-changes`      | No       | `"false"`                        | Keep unmatched Gerrit changes without warning during reconciliation                       |
 | `GERRIT_SERVER`             | `GERRIT_SERVER`             | `--gerrit-server`             | No²      | `""`                             | Gerrit server hostname (auto-derived if enabled)                                          |
 | `GERRIT_SERVER_PORT`        | `GERRIT_SERVER_PORT`        | `--gerrit-server-port`        | No       | `"29418"`                        | Gerrit SSH port                                                                           |
 | `GERRIT_PROJECT`            | `GERRIT_PROJECT`            | `--gerrit-project`            | No²      | `""`                             | Gerrit project name                                                                       |
@@ -828,11 +1024,15 @@ The following environment variables control internal behavior but are not action
 
 The action provides the following outputs for use in later workflow steps:
 
+<!-- markdownlint-disable MD013 -->
+
 | Output Name                 | Description                                 | Environment Variable        |
 | --------------------------- | ------------------------------------------- | --------------------------- |
 | `gerrit_change_request_url` | Gerrit change URL(s) (newline-separated)    | `GERRIT_CHANGE_REQUEST_URL` |
 | `gerrit_change_request_num` | Gerrit change number(s) (newline-separated) | `GERRIT_CHANGE_REQUEST_NUM` |
 | `gerrit_commit_sha`         | Patch set commit SHA(s) (newline-separated) | `GERRIT_COMMIT_SHA`         |
+
+<!-- markdownlint-enable MD013 -->
 
 These outputs export automatically as environment variables and are accessible in
 later workflow steps using `${{ steps.<step-id>.outputs.<output-name> }}` syntax.

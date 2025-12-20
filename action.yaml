@@ -64,7 +64,7 @@ inputs:
   ALLOW_DUPLICATES:
     description: "Allow submitting duplicate changes without error"
     required: false
-    default: "false"
+    default: "true"
   CI_TESTING:
     description: "Enable CI testing mode; overrides .gitreview, creates orphan commits"
     required: false

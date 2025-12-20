@@ -10,10 +10,22 @@ core orchestrator by providing the common dataclasses used across both.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 
 
-__all__ = ["GitHubContext", "Inputs"]
+__all__ = ["GitHubContext", "Inputs", "PROperationMode"]
+
+
+class PROperationMode(Enum):
+    """Represents the type of operation being performed on a PR."""
+
+    CREATE = "create"  # New PR (opened event)
+    UPDATE = "update"  # PR updated (synchronize event - rebase, new commits)
+    EDIT = "edit"  # PR metadata edited (edited event - title/description)
+    REOPEN = "reopen"  # PR reopened (reopened event)
+    CLOSE = "close"  # PR closed (closed event)
+    UNKNOWN = "unknown"  # Unknown or not applicable
 
 
 @dataclass(frozen=True)
@@ -63,7 +75,10 @@ class Inputs:
     # Reconciliation configuration options
     reuse_strategy: str = "topic+comment"  # topic, comment, topic+comment, none
     similarity_subject: float = 0.7  # Subject token Jaccard threshold
-    similarity_files: bool = True  # File signature match requirement
+    similarity_update_factor: float = (
+        0.75  # Multiplier for UPDATE operations (0.0-1.0)
+    )
+    similarity_files: bool = False  # File signature match requirement
     allow_orphan_changes: bool = (
         False  # Keep unmatched Gerrit changes without warning
     )
@@ -98,5 +113,25 @@ class GitHubContext:
 
     base_ref: str
     head_ref: str
+
+    def get_operation_mode(self) -> PROperationMode:
+        """Determine the operation mode based on event type and action.
+
+        Returns:
+            PROperationMode enum indicating the type of operation
+        """
+        if self.event_name != "pull_request_target":
+            return PROperationMode.UNKNOWN
+
+        action = self.event_action.lower() if self.event_action else ""
+
+        action_map = {
+            "opened": PROperationMode.CREATE,
+            "synchronize": PROperationMode.UPDATE,
+            "edited": PROperationMode.EDIT,
+            "reopened": PROperationMode.REOPEN,
+            "closed": PROperationMode.CLOSE,
+        }
+        return action_map.get(action, PROperationMode.UNKNOWN)
 
     pr_number: int | None

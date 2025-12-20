@@ -16,6 +16,8 @@ from datetime import datetime
 from datetime import timedelta
 from typing import Any
 
+import typer
+
 from .rich_logging import RichDisplayContext
 from .rich_logging import setup_rich_aware_logging
 
@@ -112,9 +114,8 @@ def safe_console_print(
 
         try:
             if err:
-                # Use typer.echo for stderr to ensure CliRunner captures it
-                import typer
-
+                # Always write to stderr when err=True
+                # Use typer.echo for CliRunner compatibility
                 typer.echo(message, err=True)
             elif RICH_AVAILABLE:
                 console.print(message, style=style)
