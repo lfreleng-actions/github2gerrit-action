@@ -88,6 +88,9 @@ def serialize_mapping_comment(
     lines.extend(
         [
             f"GitHub-Hash: {github_hash}",
+            "",
+            "_Note: This metadata is also included in the Gerrit commit message for reconciliation._",  # noqa: E501
+            "",
             "<!-- end github2gerrit:change-id-map -->",
         ]
     )

@@ -96,22 +96,22 @@ def demo_progress_tracking():
 
 
 def demo_bulk_processing():
-    """Demonstrate bulk processing progress."""
+    """Demonstrate processing progress."""
     target = "os-climate/osc-github-devops"
 
-    console.print(f"\n🔍 Examining repository {target}")
-
-    # Initialize progress tracker for bulk processing
+    # Initialize progress tracker for processing
     progress_tracker = G2GProgressTracker(target)
     progress_tracker.start()
 
     try:
-        progress_tracker.update_operation("Getting repository and PRs...")
+        progress_tracker.update_operation("🔍 Examining pull requests")
         time.sleep(1.0)
 
         # Simulate finding multiple PRs
         pr_count = 5
-        progress_tracker.update_operation(f"Processing {pr_count} open PRs...")
+        progress_tracker.update_operation(
+            f"🔨 Processing {pr_count} open pull requests..."
+        )
 
         for i in range(1, pr_count + 1):
             progress_tracker.update_operation(f"Processing PR #{1000 + i}...")
@@ -126,7 +126,7 @@ def demo_bulk_processing():
             else:
                 progress_tracker.add_error(f"PR #{1000 + i} processing failed")
 
-        progress_tracker.update_operation("Bulk processing completed")
+        progress_tracker.update_operation("Processing completed ✅")
         time.sleep(0.5)
 
     finally:
@@ -134,7 +134,7 @@ def demo_bulk_processing():
 
     # Show final summary
     summary = progress_tracker.get_summary()
-    console.print("\n⚠️  Bulk processing completed with some issues!")
+    console.print("\n⚠️  Processing completed with some issues!")
     console.print(f"⏱️  Total time: {summary.get('elapsed_time', 'unknown')}")
     console.print(f"📊 PRs processed: {summary['prs_processed']}")
     console.print(f"✅ Changes submitted: {summary['changes_submitted']}")
@@ -164,8 +164,8 @@ def main():
     console.print("-" * 40)
     demo_progress_tracking()
 
-    # Demo 3: Bulk Processing Progress
-    console.print("\n📋 Demo 3: Bulk Processing Progress")
+    # Demo 3: Processing Progress
+    console.print("\n📋 Demo 3: Processing Progress")
     console.print("-" * 35)
     demo_bulk_processing()
 

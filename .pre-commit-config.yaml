@@ -88,7 +88,7 @@ repos:
     hooks:
       - id: write-good
         files: "\\.(rst|md|markdown|mdown|mkdn)$"
-        exclude: "GERRIT_URL_CENTRALIZATION.md"
+        args: ["--no-adverb"]
 
   - repo: https://github.com/shellcheck-py/shellcheck-py
     rev: 745eface02aef23e168a8afb6b5737818efbea95  # frozen: v0.11.0.1
@@ -141,7 +141,8 @@ repos:
       - id: pytest
         name: pytest
         entry: uv
-        args: [run, pytest, --tb=short, -q]
+        args: [run, pytest, --tb=short, -q, -v, --strict-markers, --maxfail=5]
         language: system
         pass_filenames: false
         always_run: true
+        require_serial: true

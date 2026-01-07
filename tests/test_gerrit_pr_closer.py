@@ -13,6 +13,7 @@ from unittest.mock import MagicMock
 from unittest.mock import patch
 
 from github2gerrit.gerrit_pr_closer import _build_closure_comment
+from github2gerrit.gerrit_pr_closer import _env_bool
 from github2gerrit.gerrit_pr_closer import (
     close_github_pr_for_merged_gerrit_change,
 )
@@ -20,6 +21,54 @@ from github2gerrit.gerrit_pr_closer import extract_pr_info_for_display
 from github2gerrit.gerrit_pr_closer import extract_pr_url_from_commit
 from github2gerrit.gerrit_pr_closer import parse_pr_url
 from github2gerrit.gerrit_pr_closer import process_recent_commits_for_pr_closure
+
+
+class TestEnvBool:
+    """Tests for _env_bool helper function."""
+
+    def test_returns_true_for_true_string(self, monkeypatch):
+        """Test returns True for 'true' string."""
+        monkeypatch.setenv("TEST_VAR", "true")
+        assert _env_bool("TEST_VAR", False) is True
+
+    def test_returns_true_for_one(self, monkeypatch):
+        """Test returns True for '1' string."""
+        monkeypatch.setenv("TEST_VAR", "1")
+        assert _env_bool("TEST_VAR", False) is True
+
+    def test_returns_true_for_yes(self, monkeypatch):
+        """Test returns True for 'yes' string."""
+        monkeypatch.setenv("TEST_VAR", "yes")
+        assert _env_bool("TEST_VAR", False) is True
+
+    def test_returns_true_for_on(self, monkeypatch):
+        """Test returns True for 'on' string."""
+        monkeypatch.setenv("TEST_VAR", "on")
+        assert _env_bool("TEST_VAR", False) is True
+
+    def test_returns_false_for_false_string(self, monkeypatch):
+        """Test returns False for 'false' string."""
+        monkeypatch.setenv("TEST_VAR", "false")
+        assert _env_bool("TEST_VAR", True) is False
+
+    def test_returns_default_when_not_set(self, monkeypatch):
+        """Test returns default value when env var not set."""
+        monkeypatch.delenv("TEST_VAR", raising=False)
+        assert _env_bool("TEST_VAR", True) is True
+        assert _env_bool("TEST_VAR", False) is False
+
+    def test_returns_default_for_empty_string(self, monkeypatch):
+        """Test returns default value for empty string."""
+        monkeypatch.setenv("TEST_VAR", "")
+        assert _env_bool("TEST_VAR", True) is True
+        assert _env_bool("TEST_VAR", False) is False
+
+    def test_case_insensitive(self, monkeypatch):
+        """Test is case insensitive."""
+        monkeypatch.setenv("TEST_VAR", "TRUE")
+        assert _env_bool("TEST_VAR", False) is True
+        monkeypatch.setenv("TEST_VAR", "Yes")
+        assert _env_bool("TEST_VAR", False) is True
 
 
 class TestExtractPrUrlFromCommit:
@@ -489,11 +538,12 @@ class TestAbandonedChangeHandling:
         url = "https://gerrit.example.org/c/project/+/12345"
         comment = _build_abandoned_comment(url)
 
-        assert "Gerrit Change Abandoned" in comment
-        assert "🏳️" in comment
+        assert "Automated PR Closure" in comment
+        assert "⛔️" in comment
         assert "abandoned" in comment
+        assert "rejected" in comment
         assert url in comment
-        assert "CLOSE_MERGED_PRS" in comment
+        assert "NOT part of the main codebase" in comment
 
     def test_build_abandoned_comment_without_url(self):
         """Test building abandoned comment without Gerrit URL."""
@@ -501,10 +551,11 @@ class TestAbandonedChangeHandling:
 
         comment = _build_abandoned_comment(None)
 
-        assert "Gerrit Change Abandoned" in comment
-        assert "🏳️" in comment
+        assert "Automated PR Closure" in comment
+        assert "⛔️" in comment
         assert "abandoned" in comment
-        assert "CLOSE_MERGED_PRS" in comment
+        assert "rejected" in comment
+        assert "NOT part of the main codebase" in comment
 
     def test_build_abandoned_notification_comment_with_url(self):
         """Test building abandoned notification comment with Gerrit URL."""
@@ -578,7 +629,8 @@ class TestAbandonedChangeHandling:
         call_args = mock_close_pr.call_args
         comment = call_args[1]["comment"]
         assert "abandoned" in comment.lower()
-        assert "🏳️" in comment
+        assert "rejected" in comment.lower()
+        assert "⛔️" in comment
 
     @patch("github2gerrit.gerrit_pr_closer.check_gerrit_change_status")
     @patch("github2gerrit.gerrit_pr_closer.extract_pr_url_from_commit")
@@ -695,3 +747,317 @@ class TestAbandonedChangeHandling:
 
         # Should return False (no action taken)
         assert result is False
+
+
+class TestAbandonGerritChangeForClosedPr:
+    """Tests for abandon_gerrit_change_for_closed_pr function."""
+
+    @patch("github2gerrit.gerrit_pr_closer.build_client_for_host")
+    @patch("github2gerrit.gerrit_pr_closer.build_client")
+    @patch("github2gerrit.gerrit_pr_closer.get_pull")
+    @patch("github2gerrit.gerrit_pr_closer._abandon_gerrit_change")
+    def test_abandons_gerrit_change_for_closed_pr(
+        self,
+        mock_abandon,
+        mock_get_pull,
+        mock_build_client,
+        mock_build_gerrit_client,
+    ):
+        """Test successfully abandons Gerrit change when PR is closed."""
+        from github2gerrit.gerrit_pr_closer import (
+            abandon_gerrit_change_for_closed_pr,
+        )
+
+        # Setup Gerrit client mock
+        mock_gerrit_client = MagicMock()
+        mock_build_gerrit_client.return_value = mock_gerrit_client
+
+        # Mock Gerrit query response with matching change
+        mock_gerrit_client.get.return_value = [
+            {
+                "_number": "12345",
+                "subject": "Test change",
+                "current_revision": "rev1",
+                "revisions": {
+                    "rev1": {
+                        "commit": {
+                            "message": (
+                                "Test commit\n\n"
+                                "GitHub-PR: https://github.com/owner/repo/pull/42"
+                            )
+                        }
+                    }
+                },
+            }
+        ]
+
+        # Setup GitHub client mock
+        mock_repo = MagicMock()
+        mock_build_client.return_value.get_repo.return_value = mock_repo
+        mock_pr = MagicMock()
+        mock_pr.number = 42
+        mock_get_pull.return_value = mock_pr
+
+        # Mock PR comments
+        mock_issue = MagicMock()
+        mock_comment = MagicMock()
+        mock_comment.body = "Closing this PR"
+        mock_comment.user.login = "testuser"
+        mock_issue.get_comments.return_value = [mock_comment]
+        mock_pr.as_issue.return_value = mock_issue
+
+        # Call function
+        result = abandon_gerrit_change_for_closed_pr(
+            pr_number=42,
+            gerrit_server="gerrit.example.com",
+            gerrit_project="test-project",
+            repository="owner/repo",
+            dry_run=False,
+        )
+
+        # Verify result
+        assert result == "12345"
+        mock_abandon.assert_called_once()
+        call_args = mock_abandon.call_args
+        assert call_args[0][1] == "12345"  # change_number
+        assert "GitHub pull request #42 was closed" in call_args[0][2]
+        assert "Closing this PR" in call_args[0][2]
+
+    @patch("github2gerrit.gerrit_pr_closer.build_client_for_host")
+    def test_returns_false_when_no_matching_change(
+        self,
+        mock_build_gerrit_client,
+    ):
+        """Test returns False when no matching Gerrit change found."""
+        from github2gerrit.gerrit_pr_closer import (
+            abandon_gerrit_change_for_closed_pr,
+        )
+
+        # Setup Gerrit client mock
+        mock_gerrit_client = MagicMock()
+        mock_build_gerrit_client.return_value = mock_gerrit_client
+
+        # Mock empty Gerrit query response
+        mock_gerrit_client.get.return_value = []
+
+        # Call function
+        result = abandon_gerrit_change_for_closed_pr(
+            pr_number=42,
+            gerrit_server="gerrit.example.com",
+            gerrit_project="test-project",
+            repository="owner/repo",
+            dry_run=False,
+        )
+
+        # Verify result
+        assert result is None
+
+    @patch("github2gerrit.gerrit_pr_closer.build_client_for_host")
+    def test_returns_false_when_no_pr_url_match(
+        self,
+        mock_build_gerrit_client,
+    ):
+        """Test returns False when Gerrit changes don't match PR URL."""
+        from github2gerrit.gerrit_pr_closer import (
+            abandon_gerrit_change_for_closed_pr,
+        )
+
+        # Setup Gerrit client mock
+        mock_gerrit_client = MagicMock()
+        mock_build_gerrit_client.return_value = mock_gerrit_client
+
+        # Mock Gerrit query response with non-matching change
+        mock_gerrit_client.get.return_value = [
+            {
+                "_number": "12345",
+                "subject": "Test change",
+                "current_revision": "rev1",
+                "revisions": {
+                    "rev1": {
+                        "commit": {
+                            "message": (
+                                "Test commit\n\n"
+                                "GitHub-PR: https://github.com/owner/repo/pull/99"
+                            )
+                        }
+                    }
+                },
+            }
+        ]
+
+        # Call function looking for PR #42
+        result = abandon_gerrit_change_for_closed_pr(
+            pr_number=42,
+            gerrit_server="gerrit.example.com",
+            gerrit_project="test-project",
+            repository="owner/repo",
+            dry_run=False,
+        )
+
+        # Verify result
+        assert result is None
+
+    @patch("github2gerrit.gerrit_pr_closer.build_client_for_host")
+    @patch("github2gerrit.gerrit_pr_closer.build_client")
+    @patch("github2gerrit.gerrit_pr_closer.get_pull")
+    def test_dry_run_does_not_abandon(
+        self,
+        mock_get_pull,
+        mock_build_client,
+        mock_build_gerrit_client,
+    ):
+        """Test dry-run mode does not actually abandon change."""
+        from github2gerrit.gerrit_pr_closer import (
+            abandon_gerrit_change_for_closed_pr,
+        )
+
+        # Setup Gerrit client mock
+        mock_gerrit_client = MagicMock()
+        mock_build_gerrit_client.return_value = mock_gerrit_client
+
+        # Mock Gerrit query response with matching change
+        mock_gerrit_client.get.return_value = [
+            {
+                "_number": "12345",
+                "subject": "Test change",
+                "current_revision": "rev1",
+                "revisions": {
+                    "rev1": {
+                        "commit": {
+                            "message": (
+                                "Test commit\n\n"
+                                "GitHub-PR: https://github.com/owner/repo/pull/42"
+                            )
+                        }
+                    }
+                },
+            }
+        ]
+
+        # Setup GitHub client mock
+        mock_repo = MagicMock()
+        mock_build_client.return_value.get_repo.return_value = mock_repo
+        mock_pr = MagicMock()
+        mock_pr.number = 42
+        mock_get_pull.return_value = mock_pr
+        mock_pr.as_issue.return_value.get_comments.return_value = []
+
+        # Call function in dry-run mode
+        result = abandon_gerrit_change_for_closed_pr(
+            pr_number=42,
+            gerrit_server="gerrit.example.com",
+            gerrit_project="test-project",
+            repository="owner/repo",
+            dry_run=True,
+        )
+
+        # Verify result is change number but no POST was made
+        assert result == "12345"
+        mock_gerrit_client.post.assert_not_called()
+
+    @patch("github2gerrit.gerrit_pr_closer.build_client_for_host")
+    def test_handles_gerrit_query_exception(
+        self,
+        mock_build_gerrit_client,
+    ):
+        """Test handles exception during Gerrit query gracefully."""
+        from github2gerrit.gerrit_pr_closer import (
+            abandon_gerrit_change_for_closed_pr,
+        )
+
+        # Setup Gerrit client mock to raise exception
+        mock_gerrit_client = MagicMock()
+        mock_build_gerrit_client.return_value = mock_gerrit_client
+        mock_gerrit_client.get.side_effect = Exception("Connection error")
+
+        # Call function
+        result = abandon_gerrit_change_for_closed_pr(
+            pr_number=42,
+            gerrit_server="gerrit.example.com",
+            gerrit_project="test-project",
+            repository="owner/repo",
+            dry_run=False,
+        )
+
+        # Verify result is None
+        assert result is None
+
+    @patch("github2gerrit.gerrit_pr_closer.build_client_for_host")
+    @patch("github2gerrit.gerrit_pr_closer.build_client")
+    @patch("github2gerrit.gerrit_pr_closer.get_pull")
+    @patch("github2gerrit.gerrit_pr_closer._abandon_gerrit_change")
+    def test_includes_closure_comments(
+        self,
+        mock_abandon,
+        mock_get_pull,
+        mock_build_client,
+        mock_build_gerrit_client,
+    ):
+        """Test includes PR closure comments in abandon message."""
+        from github2gerrit.gerrit_pr_closer import (
+            abandon_gerrit_change_for_closed_pr,
+        )
+
+        # Setup Gerrit client mock
+        mock_gerrit_client = MagicMock()
+        mock_build_gerrit_client.return_value = mock_gerrit_client
+        mock_gerrit_client.get.return_value = [
+            {
+                "_number": "12345",
+                "subject": "Test change",
+                "current_revision": "rev1",
+                "revisions": {
+                    "rev1": {
+                        "commit": {
+                            "message": (
+                                "Test commit\n\n"
+                                "GitHub-PR: https://github.com/owner/repo/pull/42"
+                            )
+                        }
+                    }
+                },
+            }
+        ]
+
+        # Setup GitHub client mock with comments
+        mock_repo = MagicMock()
+        mock_build_client.return_value.get_repo.return_value = mock_repo
+        mock_pr = MagicMock()
+        mock_pr.number = 42
+        mock_get_pull.return_value = mock_pr
+
+        # Mock multiple PR comments
+        mock_issue = MagicMock()
+        mock_comment1 = MagicMock()
+        mock_comment1.body = "First comment"
+        mock_comment1.user.login = "user1"
+        mock_comment2 = MagicMock()
+        mock_comment2.body = "Second comment"
+        mock_comment2.user.login = "user2"
+        mock_comment3 = MagicMock()
+        mock_comment3.body = "Closing this now"
+        mock_comment3.user.login = "user3"
+        mock_issue.get_comments.return_value = [
+            mock_comment1,
+            mock_comment2,
+            mock_comment3,
+        ]
+        mock_pr.as_issue.return_value = mock_issue
+
+        # Call function
+        result = abandon_gerrit_change_for_closed_pr(
+            pr_number=42,
+            gerrit_server="gerrit.example.com",
+            gerrit_project="test-project",
+            repository="owner/repo",
+            dry_run=False,
+        )
+
+        # Verify abandon was called with comments included
+        assert result == "12345"
+        mock_abandon.assert_called_once()
+        abandon_message = mock_abandon.call_args[0][2]
+        assert "Comment by user1" in abandon_message
+        assert "Comment by user2" in abandon_message
+        assert "Comment by user3" in abandon_message
+        assert "Closing this now" in abandon_message

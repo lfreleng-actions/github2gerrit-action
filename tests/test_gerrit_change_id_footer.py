@@ -86,12 +86,16 @@ def test_apply_pr_title_body_preserves_change_id_footer(
     inputs = _inputs(use_pr_as_commit=True)
 
     # Current commit (before applying PR title/body) contains trailers
+    # This represents the state after _prepare_squashed_commit has run,
+    # which adds all trailers including GitHub-PR and GitHub-Hash
     existing_change_id = "Ideadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
     current_commit_message = (
         "Subject from previous step\n\n"
         "Some body content\n\n"
         "Signed-off-by: Dev One <dev1@example.org>\n"
         f"Change-Id: {existing_change_id}\n"
+        "GitHub-PR: https://github.com/acme/widget/pull/99\n"
+        "GitHub-Hash: abcd1234567890ef\n"
     )
 
     # Stub GitHub API helpers used by _apply_pr_title_body_if_requested

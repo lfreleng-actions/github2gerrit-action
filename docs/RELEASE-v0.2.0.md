@@ -6,8 +6,11 @@
 ## Overview
 
 Version 0.2.0 introduces important behavioral changes and improvements to the
-GitHub2Gerrit action. This release focuses on making the default behavior more
-aligned with common use cases and improving the handling of push events.
+GitHub2Gerrit action. This release includes **two breaking changes** to default
+settings: `PRESERVE_GITHUB_PRS` now defaults to `true` (was `false`) and
+`SIMILARITY_FILES` now defaults to `false` (was `true`). These changes make the
+default behavior more aligned with common use cases while improving the handling
+of push events and commit reconciliation.
 
 ## Breaking Changes
 
@@ -62,6 +65,63 @@ If you want to use the new recommended workflow:
     CLOSE_MERGED_PRS: "true"       # Default, you can omit this line
     # ... other inputs
 ```
+
+### ⚠️ SIMILARITY_FILES Default Changed from `true` to `false`
+
+**Impact:** MEDIUM - This affects how the system matches commits during PR
+updates and reconciliation
+
+**Previous Behavior (v0.1.x):**
+
+- Default: `SIMILARITY_FILES="true"`
+- Reconciliation required exact file signature match between GitHub PR commits and Gerrit changes
+- More strict matching that could fail to reconcile when file lists differed slightly
+
+**New Behavior (v0.2.0):**
+
+- Default: `SIMILARITY_FILES="false"`
+- Reconciliation uses more flexible matching based on commit subject and other metadata
+- File signature matching is no longer required by default
+- More lenient matching allows reconciliation even when file lists differ
+
+**Rationale:**
+
+We changed the default for these reasons:
+
+1. **Flexibility**: File-based matching was too strict and could fail to match
+   commits that were logically the same but had minor file differences
+2. **Better User Experience**: The more lenient matching reduces false negatives in commit reconciliation
+3. **Common Use Case**: Most users don't need exact file signature matching for reconciliation to work correctly
+
+**Migration Guide:**
+
+If your workflow requires exact file signature matching for security or compliance reasons:
+
+```yaml
+# Add this to restore v0.1.x strict matching behavior
+- uses: lfit/github2gerrit-action@v0.2.0
+  with:
+    SIMILARITY_FILES: "true"
+    # ... other inputs
+```
+
+If you want to use the new default (recommended):
+
+```yaml
+# Use defaults for v0.2.0 - more flexible reconciliation
+- uses: lfit/github2gerrit-action@v0.2.0
+  with:
+    SIMILARITY_FILES: "false"   # Default, you can omit this line
+    # ... other inputs
+```
+
+**Impact on Reconciliation:**
+
+- With `SIMILARITY_FILES=false` (new default): The system matches commits based
+  on subject line similarity and other metadata
+- With `SIMILARITY_FILES=true` (old default): Commits require exact file
+  signature match plus other criteria
+- The `SIMILARITY_UPDATE_FACTOR` setting still controls the threshold for subject line matching (default: 0.75)
 
 ## New Features
 
@@ -394,11 +454,16 @@ if os.getenv("G2G_TARGET_URL"):  # Works with any non-empty string
 
 ## Behavior Summary Table
 
+<!-- markdownlint-disable MD013 -->
+
 | Feature               | v0.1.x Default | v0.2.0 Default | Notes                   |
 | --------------------- | -------------- | -------------- | ----------------------- |
 | `PRESERVE_GITHUB_PRS` | `"false"`      | `"true"`       | **BREAKING CHANGE**     |
+| `SIMILARITY_FILES`    | `"true"`       | `"false"`      | **BREAKING CHANGE**     |
 | `CLOSE_MERGED_PRS`    | `"true"`       | `"true"`       | No change               |
 | Push event handling   | Basic          | Enhanced       | Better state management |
+
+<!-- markdownlint-enable MD013 -->
 
 ## Recommended Workflow Patterns
 
@@ -467,6 +532,10 @@ When upgrading from v0.1.x to v0.2.0:
 - [ ] Decide if you want the new default behavior (preserve PRs)
 - [ ] If you want v0.1.x behavior, explicitly set
   `PRESERVE_GITHUB_PRS: "false"`
+- [ ] Review your workflow files for `SIMILARITY_FILES` settings
+- [ ] Decide if you need exact file signature matching for reconciliation
+- [ ] If you require strict file-based matching, explicitly set
+  `SIMILARITY_FILES: "true"`
 - [ ] Consider enabling push event triggers if using `CLOSE_MERGED_PRS`
 - [ ] Update any documentation or runbooks referencing PR closure behavior
 - [ ] Test in a non-production environment first

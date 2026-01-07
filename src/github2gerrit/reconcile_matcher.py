@@ -79,6 +79,7 @@ class ReconciliationMatcher:
         *,
         similarity_threshold: float = 0.7,
         allow_duplicate_subjects: bool = True,
+        require_file_match: bool = False,
     ):
         """
         Initialize the matcher with configuration.
@@ -87,9 +88,12 @@ class ReconciliationMatcher:
             similarity_threshold: Minimum Jaccard similarity for subject
                 matching
             allow_duplicate_subjects: Allow multiple commits with same subject
+            require_file_match: Require exact file signature match for
+                reconciliation (Pass C)
         """
         self.similarity_threshold = similarity_threshold
         self.allow_duplicate_subjects = allow_duplicate_subjects
+        self.require_file_match = require_file_match
 
     def reconcile(
         self,
@@ -171,14 +175,15 @@ class ReconciliationMatcher:
             strategy_counts,
         )
 
-        # Pass C: File signature matching
-        remaining_commits = self._match_by_file_signature(
-            remaining_commits,
-            gerrit_changes,
-            used_changes,
-            matches,
-            strategy_counts,
-        )
+        # Pass C: File signature matching (optional)
+        if self.require_file_match:
+            remaining_commits = self._match_by_file_signature(
+                remaining_commits,
+                gerrit_changes,
+                used_changes,
+                matches,
+                strategy_counts,
+            )
 
         # Pass D: Subject similarity matching
         remaining_commits = self._match_by_subject_similarity(

@@ -381,7 +381,7 @@ class TestEnvironmentDefaults:
             "ALLOW_GHE_URLS": "false",
             "PRESERVE_GITHUB_PRS": "true",
             "DRY_RUN": "false",
-            "ALLOW_DUPLICATES": "false",
+            "ALLOW_DUPLICATES": "true",
             "CI_TESTING": "false",
             "ISSUE_ID": "",
             "G2G_USE_SSH_AGENT": "true",

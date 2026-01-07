@@ -16,6 +16,8 @@ from datetime import datetime
 from datetime import timedelta
 from typing import Any
 
+import typer
+
 from .rich_logging import RichDisplayContext
 from .rich_logging import setup_rich_aware_logging
 
@@ -112,9 +114,8 @@ def safe_console_print(
 
         try:
             if err:
-                # Use typer.echo for stderr to ensure CliRunner captures it
-                import typer
-
+                # Always write to stderr when err=True
+                # Use typer.echo for CliRunner compatibility
                 typer.echo(message, err=True)
             elif RICH_AVAILABLE:
                 console.print(message, style=style)
@@ -158,24 +159,34 @@ def safe_typer_echo(
 def display_pr_info(
     pr_info: dict[str, Any],
     title: str = "",
+    context: str = "",
     progress_tracker: Any = None,
 ) -> None:
     """Display pull request information in a formatted table.
 
     Args:
         pr_info: Dictionary containing PR information
-        title: Optional table title
+        title: Optional table title (deprecated, use context instead)
+        context: Context prefix (e.g., "New", "Abandoned", "Updated")
         progress_tracker: Optional progress tracker to suspend/resume
     """
     # Use Rich display context to manage logging interference
-    context_id = f"pr_info_display_{id(pr_info)}"
+    display_context_id = f"pr_info_display_{id(pr_info)}"
+
+    # Build display title with context
+    if context:
+        display_title = f"{context} Pull Request Details"
+    elif title:
+        display_title = title
+    else:
+        display_title = "Pull Request Details"
 
     if not RICH_AVAILABLE:
         # Fallback display for when Rich is not available
-        with RichDisplayContext(context_id):
+        with RichDisplayContext(display_context_id):
             if progress_tracker:
                 progress_tracker.suspend()
-            print(f"\n=== {title or 'Pull Request Information'} ===")
+            print(f"\n=== {display_title} ===")
             for key, value in pr_info.items():
                 print(f"{key:15}: {value}")
             print("=" * 50)
@@ -184,8 +195,8 @@ def display_pr_info(
         return
 
     # Rich display with logging context
-    with RichDisplayContext(context_id):
-        table = Table(title=title)
+    with RichDisplayContext(display_context_id):
+        table = Table(title=display_title)
         table.add_column("Property", style="cyan")
         table.add_column("Value", style="green")
 

@@ -52,7 +52,12 @@ class _DummyOrchestrator:
     def __init__(self, workspace: Any) -> None:
         self.workspace = workspace
 
-    def execute(self, *, inputs: Any, gh: Any) -> Any:
+    def _prepare_workspace_checkout(self, *, inputs: Any, gh: Any) -> None:
+        """Mock workspace checkout - does nothing."""
+
+    def execute(
+        self, *, inputs: Any, gh: Any, operation_mode: str | None = None
+    ) -> Any:
         # Capture via the test-patched global record
         _ORCH_RECORD.add(inputs, gh)
 
@@ -84,8 +89,9 @@ def test_pr_url_dry_run_invokes_single_execution(
     env = _base_env()
     pr_url = "https://github.com/onap/portal-ng-bff/pull/33"
 
-    # Patch Orchestrator in the CLI module
+    # Reset global state and patch Orchestrator in the CLI module
     global _ORCH_RECORD
+    _ORCH_RECORD = _CallRecord()
     # Mock GitHub API calls
     responses.add(
         responses.GET,
@@ -156,7 +162,7 @@ def test_repo_url_dry_run_invokes_for_each_open_pr(
 
     dummy_prs = [_DummyPR(5), _DummyPR(7)]
 
-    # Patch Orchestrator to stub execute and capture calls
+    # Reset global state and patch Orchestrator to stub execute and capture calls
     global _ORCH_RECORD
     _ORCH_RECORD = _CallRecord()
     monkeypatch.setattr(cli_mod, "Orchestrator", _DummyOrchestrator)
@@ -200,7 +206,7 @@ def test_url_mode_sets_environment_for_config_resolution(
     env = _base_env()
     repo_url = "https://github.com/onap/portal-ng-bff"
 
-    # Patch Orchestrator to avoid real work but capture calls
+    # Reset global state and patch Orchestrator to avoid real work but capture calls
     global _ORCH_RECORD
     _ORCH_RECORD = _CallRecord()
     monkeypatch.setattr(cli_mod, "Orchestrator", _DummyOrchestrator)

@@ -828,6 +828,14 @@ def check_for_duplicates(
         log.debug("No PR number provided, skipping duplicate check")
         return
 
+    # Skip duplicate check entirely if duplicates are allowed
+    if allow_duplicates:
+        log.debug(
+            "Duplicate detection skipped for PR #%s (allow_duplicates=True)",
+            gh.pr_number,
+        )
+        return
+
     log.debug("Starting duplicate detection for PR #%s", gh.pr_number)
     log.debug(
         "Duplicate check parameters: allow_duplicates=%s, lookback_days=%s",

@@ -64,7 +64,7 @@ inputs:
   ALLOW_DUPLICATES:
     description: "Allow submitting duplicate changes without error"
     required: false
-    default: "false"
+    default: "true"
   CI_TESTING:
     description: "Enable CI testing mode; overrides .gitreview, creates orphan commits"
     required: false
@@ -131,6 +131,14 @@ inputs:
     default: "[]"
   AUTOMATION_ONLY:
     description: "Only accept pull requests from known automation tools"
+    required: false
+    default: "true"
+  CLEANUP_ABANDONED:
+    description: "Close GitHub PRs when their Gerrit changes are abandoned"
+    required: false
+    default: "true"
+  CLEANUP_GERRIT:
+    description: "Abandon Gerrit changes when their GitHub PRs are closed"
     required: false
     default: "true"
 
@@ -290,6 +298,8 @@ runs:
         G2G_USE_SSH_AGENT: ${{ inputs.G2G_USE_SSH_AGENT }}
         G2G_VERBOSE: ${{ inputs.VERBOSE }}
         AUTOMATION_ONLY: ${{ inputs.AUTOMATION_ONLY }}
+        CLEANUP_ABANDONED: ${{ inputs.CLEANUP_ABANDONED }}
+        CLEANUP_GERRIT: ${{ inputs.CLEANUP_GERRIT }}
 
         # Optional Gerrit overrides (when .gitreview is missing)
         GERRIT_SERVER: ${{ inputs.GERRIT_SERVER }}

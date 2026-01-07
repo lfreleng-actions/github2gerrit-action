@@ -35,6 +35,11 @@ _HTML_DETAILS_PATTERN = re.compile(
 )
 _MARKDOWN_LINK_PATTERN = re.compile(r"\[([^\]]+)\]\([^)]+\)")
 _HTML_TAG_PATTERN = re.compile(r"<[^>]+>")
+# Remove potentially malicious HTML elements with their content
+_DANGEROUS_HTML_PATTERN = re.compile(
+    r"<(script|style|iframe|object|embed)[^>]*>.*?</\1>",
+    re.IGNORECASE | re.DOTALL,
+)
 _MULTIPLE_NEWLINES_PATTERN = re.compile(r"\n{3,}")
 _EMOJI_PATTERN = re.compile(r":[a-z_]+:")  # GitHub emoji codes like :sparkles:
 
@@ -361,8 +366,11 @@ class PRContentFilter:
 
     def _clean_html_and_markdown(self, content: str) -> str:
         """Clean HTML tags and simplify markdown links."""
-        # Remove HTML tags
-        cleaned = _HTML_TAG_PATTERN.sub("", content)
+        # First remove dangerous HTML elements with their content
+        cleaned = _DANGEROUS_HTML_PATTERN.sub("", content)
+
+        # Then remove remaining HTML tags
+        cleaned = _HTML_TAG_PATTERN.sub("", cleaned)
 
         # Simplify markdown links to just the text
         cleaned = _MARKDOWN_LINK_PATTERN.sub(r"\1", cleaned)
@@ -522,3 +530,36 @@ def filter_dependabot_pr_body(body: str | None) -> str:
     # Force apply Dependabot rule
     rule = DependabotRule()
     return rule.apply("", str(body), config.dependabot_config)
+
+
+def sanitize_gerrit_comment(comment: str | None) -> str:
+    """
+    Sanitize user comments for inclusion in Gerrit messages.
+
+    Removes HTML, markdown formatting, emoji codes, and excessive whitespace
+    to prevent malicious content or formatting issues in Gerrit.
+
+    This reuses the same sanitization logic used for PR body filtering,
+    but without the author-specific rules (Dependabot, etc).
+
+    Args:
+        comment: Raw comment text from GitHub
+
+    Returns:
+        Sanitized comment safe for Gerrit
+    """
+    if not comment:
+        return ""
+
+    # Create a minimal filter with only post-processing enabled
+    config = FilterConfig(
+        enabled=True,
+        remove_emoji_codes=True,
+        deduplicate_title_in_body=False,  # No title context for comments
+    )
+    filter_engine = PRContentFilter(config)
+
+    # Apply only the post-processing sanitization steps
+    sanitized = filter_engine._post_process("", comment)
+
+    return sanitized.strip()

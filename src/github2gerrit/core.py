@@ -237,6 +237,614 @@ class Orchestrator:
     - Comment on the PR and optionally close it.
     """
 
+    def _get_gerrit_change_details(
+        self,
+        gerrit: GerritInfo,
+        change_id: str,
+    ) -> dict[str, Any] | None:
+        """
+        Get detailed information about a Gerrit change.
+
+        Args:
+            gerrit: Gerrit connection information
+            change_id: The Change-Id to query
+
+        Returns:
+            Change details dict or None if not found
+        """
+        try:
+            import urllib.parse
+
+            from .gerrit_rest import build_client_for_host
+
+            # Use centralized URL builder
+            client = build_client_for_host(gerrit.host)
+
+            # Query by change_id
+            encoded_id = urllib.parse.quote(change_id, safe="")
+            query_path = (
+                f"/changes/{encoded_id}?o=CURRENT_REVISION&o=CURRENT_COMMIT"
+            )
+
+            log.debug("Querying change details for: %s", change_id)
+            change = client.get(query_path)
+
+            if change:
+                log.debug(
+                    "Retrieved change details: subject=%s, status=%s",
+                    change.get("subject", ""),
+                    change.get("status", ""),
+                )
+                return dict(change) if isinstance(change, dict) else None
+
+        except Exception as exc:
+            log.debug("Failed to get change details for %s: %s", change_id, exc)
+
+        return None
+
+    def _update_gerrit_change_metadata(
+        self,
+        gerrit: GerritInfo,
+        change_id: str,
+        title: str | None = None,
+        description: str | None = None,
+    ) -> bool:
+        """
+        Update Gerrit change metadata (title/description) via REST API.
+
+        Preserves existing GitHub2Gerrit metadata block and trailers from
+        the current commit message.
+
+        Args:
+            gerrit: Gerrit connection information
+            change_id: The Change-Id to update
+            title: New commit subject/title (optional)
+            description: New commit message body (optional)
+
+        Returns:
+            True if update succeeded, False otherwise
+        """
+        if not title and not description:
+            log.debug("No metadata to update")
+            return True
+
+        try:
+            import urllib.parse
+
+            # Get credentials if available
+            http_user = (
+                os.getenv("GERRIT_HTTP_USER", "").strip()
+                or os.getenv("GERRIT_SSH_USER_G2G", "").strip()
+            )
+            http_pass = os.getenv("GERRIT_HTTP_PASSWORD", "").strip()
+
+            if not http_user or not http_pass:
+                log.debug(
+                    "Cannot update Gerrit change metadata: "
+                    "GERRIT_HTTP_USER/PASSWORD not configured"
+                )
+                return False
+
+            # Use centralized URL builder
+            from .gerrit_rest import build_client_for_host
+
+            client = build_client_for_host(
+                gerrit.host,
+                http_user=http_user,
+                http_password=http_pass,
+            )
+
+            encoded_id = urllib.parse.quote(change_id, safe="")
+
+            # Get current commit message to preserve G2G metadata and trailers
+            current_change = self._get_gerrit_change_details(gerrit, change_id)
+            existing_g2g_metadata = ""
+            existing_trailers = ""
+
+            if current_change:
+                # Extract current commit message
+                rev = str(current_change.get("current_revision") or "")
+                revisions = current_change.get("revisions") or {}
+                if rev and rev in revisions:
+                    commit_data = revisions[rev].get("commit", {})
+                    current_msg = commit_data.get("message", "")
+
+                    # Extract G2G metadata block if present
+                    g2g_start = current_msg.find("\nGitHub2Gerrit Metadata:")
+                    if g2g_start != -1:
+                        # Find where trailers start after G2G metadata
+                        g2g_section = current_msg[g2g_start:]
+                        trailer_start = -1
+                        for line in g2g_section.split("\n"):
+                            trailer_prefixes = [
+                                "Issue-ID:",
+                                "Signed-off-by:",
+                                "Change-Id:",
+                                "GitHub-PR:",
+                                "GitHub-Hash:",
+                                "Co-authored-by:",
+                            ]
+                            if any(
+                                line.strip().startswith(prefix)
+                                for prefix in trailer_prefixes
+                            ):
+                                trailer_start = current_msg.find(
+                                    line, g2g_start
+                                )
+                                break
+
+                        if trailer_start != -1:
+                            existing_g2g_metadata = current_msg[
+                                g2g_start:trailer_start
+                            ].rstrip()
+                            existing_trailers = current_msg[trailer_start:]
+                        else:
+                            # No trailers found, G2G metadata extends to end
+                            existing_g2g_metadata = current_msg[g2g_start:]
+                    else:
+                        # No G2G metadata, just extract trailers
+                        lines = current_msg.split("\n")
+                        for i in range(len(lines) - 1, -1, -1):
+                            line = lines[i].strip()
+                            trailer_prefixes = [
+                                "Issue-ID:",
+                                "Signed-off-by:",
+                                "Change-Id:",
+                                "GitHub-PR:",
+                                "GitHub-Hash:",
+                                "Co-authored-by:",
+                            ]
+                            if line and any(
+                                line.startswith(prefix)
+                                for prefix in trailer_prefixes
+                            ):
+                                existing_trailers = "\n".join(lines[i:])
+                                break
+
+            # Build new commit message preserving metadata and trailers
+            if title and description:
+                new_message = f"{title}\n\n{description}"
+            elif title:
+                new_message = title
+            else:
+                new_message = description or ""
+
+            # Append preserved G2G metadata block
+            if existing_g2g_metadata:
+                new_message = new_message.rstrip() + existing_g2g_metadata
+
+            # Append preserved trailers
+            if existing_trailers:
+                if not new_message.endswith("\n\n"):
+                    new_message = new_message.rstrip() + "\n\n"
+                new_message += existing_trailers
+
+            # Update commit message via REST API
+            # PUT /changes/{change-id}/message
+            update_data = {"message": new_message}
+
+            log.info(
+                "Updating Gerrit change %s metadata via REST API",
+                change_id,
+            )
+            log.debug("New message (first 100 chars): %s", new_message[:100])
+
+            result = client.put(
+                f"/changes/{encoded_id}/message",
+                data=update_data,
+            )
+
+            if result:
+                log.info("✅ Successfully updated Gerrit change metadata")
+                return True
+            else:
+                log.warning(
+                    "Gerrit change metadata update returned empty result"
+                )
+                return False
+
+        except Exception as exc:
+            log.warning("Failed to update Gerrit change metadata: %s", exc)
+            return False
+
+    def _sync_gerrit_change_metadata(
+        self,
+        gh: GitHubContext,
+        gerrit: GerritInfo,
+        change_ids: list[str],
+    ) -> None:
+        """
+        Sync PR title to Gerrit change(s) when PR is edited.
+
+        This only syncs the PR title (subject line) to Gerrit when the
+        PR title is changed on GitHub. The commit message body comes from
+        the actual git commit pushed to Gerrit, not from this sync.
+
+        Args:
+            gh: GitHub context
+            gerrit: Gerrit connection info
+            change_ids: List of Change-IDs to potentially update
+        """
+        if not change_ids or not gh.pr_number:
+            return
+
+        try:
+            # Get PR title and body
+            client = build_client()
+            repo = get_repo_from_env(client)
+            pr_obj = get_pull(repo, int(gh.pr_number))
+
+            pr_title, pr_body = get_pr_title_body(pr_obj)
+            pr_title = (pr_title or "").strip()
+            pr_body = (pr_body or "").strip()
+
+            if not pr_title:
+                log.debug("PR has no title, skipping metadata sync")
+                return
+
+            log.debug(
+                "PR metadata: title=%s, body_len=%d",
+                pr_title[:50] + ("..." if len(pr_title) > 50 else ""),
+                len(pr_body),
+            )
+
+            # Check each change and update if needed
+            for change_id in change_ids:
+                change = self._get_gerrit_change_details(gerrit, change_id)
+                if not change:
+                    log.warning(
+                        "Could not retrieve change details for %s",
+                        change_id,
+                    )
+                    continue
+
+                gerrit_subject = (change.get("subject") or "").strip()
+
+                # Compare titles (subject lines)
+                if gerrit_subject != pr_title:
+                    log.debug(
+                        "📝 PR title differs from Gerrit subject, updating..."
+                    )
+                    log.debug("PR title: %s", pr_title)
+                    log.debug("Gerrit subject: %s", gerrit_subject)
+
+                    # Update with PR title and body
+                    self._update_gerrit_change_metadata(
+                        gerrit=gerrit,
+                        change_id=change_id,
+                        title=pr_title,
+                        description=pr_body,
+                    )
+                else:
+                    log.debug(
+                        "Gerrit change subject matches PR title, "
+                        "no update needed"
+                    )
+
+        except Exception as exc:
+            log.debug("Failed to sync metadata to Gerrit: %s", exc)
+
+    def _verify_patchset_creation(
+        self,
+        gerrit: GerritInfo,
+        change_ids: list[str],
+        expected_operation: str = "update",
+    ) -> None:
+        """
+        Verify that patchsets were created/updated correctly in Gerrit.
+
+        For UPDATE operations, verify that:
+        - The Change-IDs match what we expected
+        - The changes exist and are not abandoned
+        - New patchsets were created (patchset number > 1)
+
+        Args:
+            gerrit: Gerrit connection information
+            change_ids: List of Change-IDs that should have been updated
+            expected_operation: "update" or "edit" for logging purposes
+
+        Raises:
+            OrchestratorError: If verification fails critically
+        """
+        if not change_ids:
+            log.debug("No change IDs to verify")
+            return
+
+        try:
+            import urllib.parse
+
+            from .gerrit_rest import build_client_for_host
+
+            # Use centralized URL builder
+            client = build_client_for_host(gerrit.host)
+
+            verification_results = []
+
+            for change_id in change_ids:
+                try:
+                    encoded_id = urllib.parse.quote(change_id, safe="")
+                    query_path = f"/changes/{encoded_id}?o=CURRENT_REVISION"
+
+                    change = client.get(query_path)
+
+                    if not change:
+                        log.warning(
+                            "⚠️  Could not verify change %s - not found",
+                            change_id,
+                        )
+                        verification_results.append(
+                            {
+                                "change_id": change_id,
+                                "status": "not_found",
+                                "verified": False,
+                            }
+                        )
+                        continue
+
+                    status = change.get("status", "UNKNOWN")
+                    current_revision = change.get("current_revision", "")
+                    revisions = change.get("revisions", {})
+
+                    # Get patchset number
+                    patchset_num = 0
+                    if current_revision and current_revision in revisions:
+                        patchset_num = revisions[current_revision].get(
+                            "_number", 0
+                        )
+
+                    change_number = change.get("_number", "unknown")
+                    subject = change.get("subject", "")[:60]
+
+                    verification_results.append(
+                        {
+                            "change_id": change_id,
+                            "change_number": change_number,
+                            "status": status,
+                            "patchset": patchset_num,
+                            "subject": subject,
+                            "verified": True,
+                        }
+                    )
+
+                    # Log detailed info
+                    if patchset_num > 1:
+                        log.debug(
+                            "✅ Verified %s: Change %s, patchset %d, status=%s",
+                            expected_operation.upper(),
+                            change_number,
+                            patchset_num,
+                            status,
+                        )
+                    elif patchset_num == 1:
+                        log.warning(
+                            "⚠️  Change %s has patchset 1 - may be newly "
+                            "created instead of updated",
+                            change_number,
+                        )
+                    else:
+                        log.warning(
+                            "⚠️  Could not determine patchset number "
+                            "for change %s",
+                            change_number,
+                        )
+
+                    if status == "ABANDONED":
+                        log.warning(
+                            "⚠️  Change %s is ABANDONED - update may not "
+                            "be visible",
+                            change_number,
+                        )
+
+                except Exception as exc:
+                    log.debug("Failed to verify change %s: %s", change_id, exc)
+                    verification_results.append(
+                        {
+                            "change_id": change_id,
+                            "status": "error",
+                            "verified": False,
+                            "error": str(exc),
+                        }
+                    )
+
+            # Summary
+            verified_count = sum(
+                1 for r in verification_results if r.get("verified")
+            )
+            total_count = len(verification_results)
+
+            if verified_count == total_count:
+                log.debug(
+                    "✅ Verification complete: %d/%d changes verified",
+                    verified_count,
+                    total_count,
+                )
+            else:
+                log.warning(
+                    "⚠️  Verification incomplete: %d/%d changes verified",
+                    verified_count,
+                    total_count,
+                )
+
+            # Store verification results for potential later use
+            self._verification_results = verification_results
+
+        except Exception as exc:
+            log.warning("Patchset verification failed (non-fatal): %s", exc)
+
+    def _find_existing_change_for_pr(
+        self,
+        gh: GitHubContext,
+        gerrit: GerritInfo,
+    ) -> list[str]:
+        """
+        Find existing Gerrit change(s) for a given PR using multiple strategies.
+
+        This method attempts to locate existing Gerrit changes associated with
+        the current PR using the following strategies in order:
+        1. Topic-based query (most reliable)
+        2. GitHub-Hash trailer matching
+        3. GitHub-PR trailer URL matching
+        4. Mapping comment parsing from PR comments
+
+        Args:
+            gh: GitHub context containing PR information
+            gerrit: Gerrit connection information
+
+        Returns:
+            List of Change-IDs for existing changes (empty if none found)
+        """
+        if not gh.pr_number:
+            log.debug("No PR number provided, cannot find existing changes")
+            return []
+
+        change_ids: list[str] = []
+
+        # Build expected metadata for matching
+        expected_pr_url = f"{gh.server_url}/{gh.repository}/pull/{gh.pr_number}"
+        meta_trailers = self._build_pr_metadata_trailers(gh)
+        expected_github_hash = ""
+        for trailer in meta_trailers:
+            if trailer.startswith("GitHub-Hash:"):
+                expected_github_hash = trailer.split(":", 1)[1].strip()
+                break
+
+        log.debug(
+            "Searching for existing changes: PR=%s, GitHub-Hash=%s",
+            expected_pr_url,
+            expected_github_hash,
+        )
+
+        # Strategy 1: Topic-based query (most reliable)
+        try:
+            from .gerrit_query import query_changes_by_topic
+
+            # Construct topic name
+            if "/" in gh.repository:
+                repo_name = gh.repository.split("/")[-1]
+            else:
+                repo_name = gh.repository
+            topic = f"GH-{gh.repository_owner}-{repo_name}-{gh.pr_number}"
+
+            log.debug("Querying Gerrit for topic: %s", topic)
+
+            # Build client using centralized URL builder
+            from .gerrit_rest import build_client_for_host
+
+            client = build_client_for_host(gerrit.host)
+
+            # Query for NEW and MERGED changes (not abandoned)
+            changes = query_changes_by_topic(
+                client,
+                topic,
+                statuses=["NEW", "MERGED"],
+            )
+
+            if changes:
+                change_ids = [c.change_id for c in changes if c.change_id]
+                log.info(
+                    "✅ Found %d existing change(s) by topic: %s",
+                    len(change_ids),
+                    ", ".join(change_ids[:3])
+                    + ("..." if len(change_ids) > 3 else ""),
+                )
+                return change_ids
+            else:
+                log.debug("No changes found for topic: %s", topic)
+
+        except Exception as exc:
+            log.debug("Topic-based query failed: %s", exc)
+
+        # Strategy 2 & 3: Query by GitHub-Hash and GitHub-PR trailers
+        if expected_github_hash:
+            try:
+                import urllib.parse
+
+                from .gerrit_rest import build_client_for_host
+
+                # Use centralized URL builder
+                client = build_client_for_host(gerrit.host)
+
+                # Build query for changes with matching GitHub-Hash trailer
+
+                query = (
+                    f"project:{gerrit.project} message:{expected_github_hash}"
+                )
+                encoded_q = urllib.parse.quote(query, safe="")
+                query_path = f"/changes/?q={encoded_q}&n=50&o=CURRENT_REVISION"
+
+                log.debug("Querying for GitHub-Hash: %s", expected_github_hash)
+
+                data = client.get(query_path)
+                if isinstance(data, list) and data:
+                    # Filter to only those with matching GitHub-Hash in
+                    # commit message
+                    for change in data:
+                        rev = str(change.get("current_revision") or "")
+                        revisions = change.get("revisions") or {}
+                        if rev and rev in revisions:
+                            commit_data = revisions[rev].get("commit", {})
+                            commit_msg = commit_data.get("message", "")
+                            expected_hash_line = (
+                                f"GitHub-Hash: {expected_github_hash}"
+                            )
+                            if expected_hash_line in commit_msg:
+                                cid = change.get("change_id", "")
+                                if cid and cid not in change_ids:
+                                    change_ids.append(cid)
+
+                    if change_ids:
+                        log.info(
+                            "✅ Found %d change(s) by GitHub-Hash trailer",
+                            len(change_ids),
+                        )
+                        return change_ids
+
+            except Exception as exc:
+                log.debug("GitHub-Hash trailer query failed: %s", exc)
+
+        # Strategy 4: Parse mapping comments from PR
+        try:
+            from .mapping_comment import parse_mapping_comments
+
+            client_gh = build_client()
+            repo = get_repo_from_env(client_gh)
+            pr_obj = get_pull(repo, int(gh.pr_number))
+
+            issue = pr_obj.as_issue()
+            comments = list(issue.get_comments())
+            comment_bodies = [c.body or "" for c in comments]
+
+            mapping = parse_mapping_comments(comment_bodies)
+
+            if mapping and mapping.change_ids:
+                # Validate consistency
+                from .mapping_comment import validate_mapping_consistency
+
+                if validate_mapping_consistency(
+                    mapping,
+                    expected_pr_url,
+                    expected_github_hash,
+                ):
+                    change_ids = mapping.change_ids
+                    log.debug(
+                        "✅ Found %d change(s) from mapping comment",
+                        len(change_ids),
+                    )
+                    return change_ids
+                else:
+                    log.warning(
+                        "Mapping comment found but consistency check failed"
+                    )
+
+        except Exception as exc:
+            log.debug("Mapping comment parsing failed: %s", exc)
+
+        log.warning(
+            "⚠️  No existing Gerrit changes found for PR #%s",
+            gh.pr_number,
+        )
+        return []
+
     # Phase 1 helper: build deterministic PR metadata trailers
     # Phase 3 introduces reconciliation helpers below for reusing prior
     # Change-Ids
@@ -269,6 +877,45 @@ class Orchestrator:
             log.debug("Failed to compute GitHub-Hash trailer: %s", exc)
         return trailers
 
+    def _build_g2g_metadata_block(
+        self,
+        gh: GitHubContext,
+        mode: str,
+        topic: str,
+        change_ids: list[str] | None = None,
+    ) -> str:
+        """
+        Build GitHub2Gerrit metadata block for inclusion in commit message.
+
+        This metadata block helps with reconciliation when changes are merged
+        or abandoned in Gerrit.
+
+        Args:
+            gh: GitHub context
+            mode: "squash" or "multi-commit"
+            topic: Gerrit topic name
+            change_ids: Optional list of Change-IDs for multi-commit mode
+
+        Returns:
+            Formatted metadata block
+        """
+        lines = ["", "GitHub2Gerrit Metadata:"]
+        lines.append(f"Mode: {mode}")
+        lines.append(f"Topic: {topic}")
+
+        # Add digest if available from reconciliation
+        plan_snapshot = getattr(self, "_reconciliation_plan", None)
+        if isinstance(plan_snapshot, dict):
+            digest = plan_snapshot.get("digest", "") or ""
+            if digest:
+                lines.append(f"Digest: {digest}")
+
+        # For multi-commit mode, include all Change-IDs
+        if change_ids and len(change_ids) > 1:
+            lines.append(f"Change-Ids: {', '.join(change_ids)}")
+
+        return "\n".join(lines)
+
     def _build_commit_message_with_trailers(
         self,
         base_message: str,
@@ -277,6 +924,10 @@ class Orchestrator:
         *,
         change_id: str | None = None,
         preserve_existing: bool = True,
+        include_g2g_metadata: bool = False,
+        g2g_mode: str | None = None,
+        g2g_topic: str | None = None,
+        g2g_change_ids: list[str] | None = None,
     ) -> str:
         """
         Build complete commit message with all trailers in proper order.
@@ -296,6 +947,11 @@ class Orchestrator:
             gh: GitHub context
             change_id: Optional Change-ID to inject
             preserve_existing: Whether to preserve existing trailers
+            include_g2g_metadata: Whether to include GitHub2Gerrit
+                metadata block
+            g2g_mode: Mode for metadata block (squash/multi-commit)
+            g2g_topic: Topic for metadata block
+            g2g_change_ids: Change-IDs for metadata block
 
         Returns:
             Complete commit message with all trailers properly ordered
@@ -354,8 +1010,8 @@ class Orchestrator:
                 issue_id_value = inputs.issue_id.strip().replace(
                     "Issue-ID: ", ""
                 )
-                log.info(
-                    "Adding Issue-ID to commit message: %s", issue_id_value
+                log.debug(
+                    "✅ Added Issue-ID %s to commit message", issue_id_value
                 )
                 print(f"✅ Added Issue-ID {issue_id_value} to commit message")
         elif preserve_existing and "Issue-ID" in existing_trailers:
@@ -387,6 +1043,13 @@ class Orchestrator:
             # Check if not already present
             if gh_trailer not in trailers_ordered:
                 trailers_ordered.append(gh_trailer)
+
+        # Add GitHub2Gerrit metadata block before trailers if requested
+        if include_g2g_metadata and g2g_mode and g2g_topic:
+            metadata_block = self._build_g2g_metadata_block(
+                gh, g2g_mode, g2g_topic, g2g_change_ids
+            )
+            base_body = base_body + "\n" + metadata_block
 
         # Assemble final message
         if trailers_ordered:
@@ -523,6 +1186,56 @@ class Orchestrator:
                 exc,
             )
 
+    def _enforce_existing_change_for_update(
+        self,
+        gh: GitHubContext,
+        gerrit: GerritInfo,
+    ) -> list[str]:
+        """
+        Enforce that an existing change is found for UPDATE operations.
+
+        For PR synchronize events, we expect a Gerrit change to already exist.
+        This method finds it and raises an error if not found.
+
+        Args:
+            gh: GitHub context
+            gerrit: Gerrit connection info
+
+        Returns:
+            List of Change-IDs that must be reused
+
+        Raises:
+            OrchestratorError: If no existing change found for UPDATE operation
+        """
+        change_ids = self._find_existing_change_for_pr(gh, gerrit)
+
+        if not change_ids:
+            if "/" in gh.repository:
+                repo_name = gh.repository.split("/")[-1]
+            else:
+                repo_name = gh.repository
+            topic = f"GH-{gh.repository_owner}-{repo_name}-{gh.pr_number}"
+
+            msg = (
+                f"UPDATE operation requires existing Gerrit change, but "
+                f"none found. "
+                f"PR #{gh.pr_number} should have an existing change with "
+                f"topic '{topic}'. "
+                f"This usually means:\n"
+                f"1. The PR was not previously processed by GitHub2Gerrit\n"
+                f"2. The Gerrit change was abandoned or deleted\n"
+                f"3. The topic was manually changed in Gerrit\n"
+                f"Consider using 'opened' event type or check Gerrit for "
+                f"the change."
+            )
+            raise OrchestratorError(msg)
+
+        log.debug(
+            "✅ Found %d existing change(s) for UPDATE operation",
+            len(change_ids),
+        )
+        return change_ids
+
     def _perform_robust_reconciliation(
         self,
         inputs: Inputs,
@@ -550,14 +1263,20 @@ class Orchestrator:
             if trailer.startswith("GitHub-Hash:"):
                 expected_github_hash = trailer.split(":", 1)[1].strip()
                 break
-        change_ids = perform_reconciliation(
-            inputs=inputs,
-            gh=gh,
-            gerrit=gerrit,
-            local_commits=local_commits,
-            expected_pr_url=expected_pr_url,
-            expected_github_hash=expected_github_hash or None,
-        )
+
+            # Check if this is an update operation
+            operation_mode = os.getenv("G2G_OPERATION_MODE", "unknown")
+            is_update_op = operation_mode == "update"
+
+            change_ids = perform_reconciliation(
+                inputs=inputs,
+                gh=gh,
+                gerrit=gerrit,
+                local_commits=local_commits,
+                expected_pr_url=expected_pr_url,
+                expected_github_hash=expected_github_hash or None,
+                is_update_operation=is_update_op,
+            )
         # Store lightweight plan snapshot (only fields needed for verify)
         try:
             self._reconciliation_plan = {
@@ -604,12 +1323,10 @@ class Orchestrator:
         )
         try:
             from .gerrit_query import query_changes_by_topic
-            from .gerrit_rest import GerritRestClient
+            from .gerrit_rest import build_client_for_host
 
-            client = GerritRestClient(
-                base_url=f"https://{gerrit.host}:{gerrit.port}",
-                auth=None,
-            )
+            # Use centralized URL builder
+            client = build_client_for_host(gerrit.host)
             # Re-query only NEW changes; merged ones are stable but keep for
             # compatibility with earlier reuse logic if needed.
             changes = query_changes_by_topic(
@@ -801,6 +1518,7 @@ class Orchestrator:
         self,
         inputs: Inputs,
         gh: GitHubContext,
+        operation_mode: str | None = None,
     ) -> SubmissionResult:
         """Run the full pipeline and return a structured result.
 
@@ -816,9 +1534,23 @@ class Orchestrator:
         self._inputs = inputs  # Store for access by helper methods
         self._guard_pull_request_context(gh)
 
+        # Determine operation mode
+        if operation_mode is None:
+            operation_mode = os.getenv("G2G_OPERATION_MODE", "unknown")
+
+        is_update_operation = operation_mode == "update"
+        is_edit_operation = operation_mode == "edit"
+
+        if is_update_operation:
+            log.debug("📝 Executing UPDATE operation (PR synchronize event)")
+        elif is_edit_operation:
+            log.debug("✏️  Executing EDIT operation (PR edited event)")
+        else:
+            log.debug("🆕 Executing CREATE operation (new PR or unknown event)")
+
         # Initialize git repository in workspace if it doesn't exist
         if not (self.workspace / ".git").exists():
-            self._prepare_workspace_checkout(inputs, gh)
+            self._prepare_workspace_checkout(inputs=inputs, gh=gh)
 
         gitreview = self._read_gitreview(self.workspace / ".gitreview", gh)
         repo_names = self._derive_repo_names(gitreview, gh)
@@ -876,34 +1608,41 @@ class Orchestrator:
         # Configure git identity BEFORE any merge operations that create commits
         self._ensure_git_user_identity(inputs)
 
-        if inputs.submit_single_commits:
-            prep = self._prepare_single_commits(inputs, gh, gerrit)
-        else:
-            prep = self._prepare_squashed_commit(inputs, gh, gerrit)
-
         self._configure_git(gerrit, inputs)
 
         # Phase 3: Robust reconciliation with multi-pass matching
+        # For UPDATE operations, enforce finding existing changes
+        forced_reuse_ids: list[str] = []
+        if is_update_operation or is_edit_operation:
+            log.debug("🔍 Searching for existing Gerrit change(s) to update...")
+            forced_reuse_ids = self._enforce_existing_change_for_update(
+                gh, gerrit
+            )
+            log.debug(
+                "✅ Will update existing change(s): %s",
+                ", ".join(forced_reuse_ids[:3])
+                + ("..." if len(forced_reuse_ids) > 3 else ""),
+            )
+
+        # Optimization: Determine reuse Change-IDs BEFORE preparing commits.
+        # This avoids redundant preparation calls - previously we prepared
+        # commits once initially, then if reuse_ids were found, we prepared
+        # them again, discarding the first preparation's work. Now we determine
+        # reuse_ids first, then prepare commits only once with the correct IDs.
+        reuse_ids: list[str] = []
         if inputs.submit_single_commits:
             # Extract local commits for multi-commit reconciliation
             local_commits = self._extract_local_commits_for_reconciliation(
                 inputs, gh
             )
-            reuse_ids = self._perform_robust_reconciliation(
-                inputs, gh, gerrit, local_commits
-            )
 
-            if reuse_ids:
-                try:
-                    prep = self._prepare_single_commits(
-                        inputs, gh, gerrit, reuse_change_ids=reuse_ids
-                    )
-                except Exception as exc:
-                    log.debug(
-                        "Re-preparation with reuse Change-Ids failed "
-                        "(continuing without reuse): %s",
-                        exc,
-                    )
+            # Use forced reuse IDs for UPDATE operations, otherwise reconcile
+            if forced_reuse_ids:
+                reuse_ids = forced_reuse_ids
+            else:
+                reuse_ids = self._perform_robust_reconciliation(
+                    inputs, gh, gerrit, local_commits
+                )
         else:
             # For squash mode, use modern reconciliation with single commit
             local_commits = self._extract_local_commits_for_reconciliation(
@@ -911,22 +1650,32 @@ class Orchestrator:
             )
             # Limit to first commit for squash mode
             single_commit = local_commits[:1] if local_commits else []
-            reuse_ids = self._perform_robust_reconciliation(
-                inputs, gh, gerrit, single_commit
-            )
-            if reuse_ids:
-                try:
-                    prep = self._prepare_squashed_commit(
-                        inputs, gh, gerrit, reuse_change_ids=reuse_ids[:1]
-                    )
-                except Exception as exc:
-                    log.debug(
-                        "Re-preparation with reuse Change-Ids failed "
-                        "(continuing without reuse): %s",
-                        exc,
-                    )
 
-        self._apply_pr_title_body_if_requested(inputs, gh)
+            # Use forced reuse IDs for UPDATE operations, otherwise reconcile
+            if forced_reuse_ids:
+                reuse_ids = forced_reuse_ids[:1]  # Only first for squash
+            else:
+                reuse_ids = self._perform_robust_reconciliation(
+                    inputs, gh, gerrit, single_commit
+                )
+
+        # Now prepare commits once with the correct reuse_ids
+        if inputs.submit_single_commits:
+            prep = self._prepare_single_commits(
+                inputs,
+                gh,
+                gerrit,
+                reuse_change_ids=reuse_ids if reuse_ids else None,
+            )
+        else:
+            prep = self._prepare_squashed_commit(
+                inputs,
+                gh,
+                gerrit,
+                reuse_change_ids=reuse_ids[:1] if reuse_ids else None,
+            )
+
+        self._apply_pr_title_body_if_requested(inputs, gh, operation_mode)
 
         # Store context for downstream push/comment emission (Phase 2)
         self._gh_context_for_push = gh
@@ -944,6 +1693,24 @@ class Orchestrator:
             repo=repo_names,
             change_ids=prep.change_ids,
         )
+
+        # Verify patchset creation for UPDATE operations
+        if is_update_operation or is_edit_operation:
+            log.debug("🔍 Verifying patchset creation...")
+            self._verify_patchset_creation(
+                gerrit=gerrit,
+                change_ids=prep.change_ids,
+                expected_operation="update" if is_update_operation else "edit",
+            )
+
+        # Sync metadata for UPDATE and EDIT operations
+        if is_update_operation or is_edit_operation:
+            log.debug("🔄 Syncing PR metadata to Gerrit change(s)...")
+            self._sync_gerrit_change_metadata(
+                gh=gh,
+                gerrit=gerrit,
+                change_ids=prep.change_ids,
+            )
 
         self._add_backref_comment_in_gerrit(
             gerrit=gerrit,
@@ -2065,6 +2832,16 @@ class Orchestrator:
             if reuse_change_ids and idx < len(reuse_change_ids):
                 desired_change_id = reuse_change_ids[idx]
 
+            # Build topic for metadata
+            if "/" in gh.repository:
+                repo_name = gh.repository.split("/")[-1]
+            else:
+                repo_name = gh.repository
+            if gh.pr_number:
+                topic = f"GH-{gh.repository_owner}-{repo_name}-{gh.pr_number}"
+            else:
+                topic = f"GH-{gh.repository_owner}-{repo_name}"
+
             # Use centralized function to build complete message
             # with all trailers
             new_msg = self._build_commit_message_with_trailers(
@@ -2073,6 +2850,10 @@ class Orchestrator:
                 gh=gh,
                 change_id=desired_change_id,
                 preserve_existing=True,
+                include_g2g_metadata=True,
+                g2g_mode="multi-commit",
+                g2g_topic=topic,
+                g2g_change_ids=reuse_change_ids if reuse_change_ids else None,
             )
 
             # Only amend if message changed
@@ -2213,10 +2994,10 @@ class Orchestrator:
                 merge_exc, base_sha, head_sha
             )
 
-            # Log detailed error information
-            log.exception("Git merge --squash failed: %s", error_details)
+            # Log error at debug level - user-friendly message comes later
+            log.debug("Git merge --squash failed: %s", error_details)
             if recovery_msg:
-                log.exception("Suggested recovery: %s", recovery_msg)
+                log.debug("Suggested recovery: %s", recovery_msg)
 
             # Enhanced debugging if verbose mode is enabled
             from .utils import is_verbose_mode
@@ -2224,15 +3005,23 @@ class Orchestrator:
             if is_verbose_mode():
                 self._debug_merge_failure_context(base_sha, head_sha)
 
-            # Re-raise with enhanced context
-            raise OrchestratorError(
-                f"Failed to merge PR commits: {error_details}"
-                + (
-                    f"\nSuggested recovery: {recovery_msg}"
-                    if recovery_msg
-                    else ""
+            # Re-raise with user-friendly message
+            error_msg = "Failed to merge PR commits"
+            if "refusing to merge unrelated histories" in str(merge_exc):
+                error_msg = (
+                    "Cannot merge PR: branches have unrelated histories. "
+                    "The PR branch may not be based on the correct target "
+                    "branch."
                 )
-            ) from merge_exc
+            elif recovery_msg and "conflict" in recovery_msg.lower():
+                error_msg = (
+                    "Cannot merge PR: merge conflicts detected. "
+                    "Please resolve conflicts in the PR."
+                )
+            elif recovery_msg:
+                error_msg = f"Failed to merge PR commits. {recovery_msg}"
+
+            raise OrchestratorError(error_msg) from merge_exc
 
         def _collect_log_lines() -> list[str]:
             body = run_cmd(
@@ -2490,12 +3279,32 @@ class Orchestrator:
         self,
         inputs: Inputs,
         gh: GitHubContext,
+        operation_mode: str | None = None,
     ) -> None:
-        """Optionally replace commit message with PR title/body."""
+        """Optionally replace commit message with PR title/body.
+
+        This function ONLY replaces the subject and body of the commit,
+        preserving ALL existing trailers (Issue-ID, Change-Id, GitHub-PR,
+        etc.) that were already added by _prepare_squashed_commit or
+        _prepare_single_commits.
+
+        For UPDATE operations, this will skip the override to respect
+        manual commit amendments made by the user.
+        """
         if not inputs.use_pr_as_commit:
             log.debug("USE_PR_AS_COMMIT disabled; skipping")
             return
-        log.info("Applying PR title/body to commit for PR #%s", gh.pr_number)
+
+        # For UPDATE operations, skip PR title/body override to respect
+        # manual commit message amendments
+        if operation_mode == "update":
+            log.debug(
+                "UPDATE operation detected; skipping PR title/body override "
+                "to respect manual commit amendments"
+            )
+            return
+
+        log.debug("Applying PR title/body to commit for PR #%s", gh.pr_number)
         pr = str(gh.pr_number or "").strip()
         if not pr:
             return
@@ -2534,59 +3343,81 @@ class Orchestrator:
                     title, author_login, self.workspace
                 )
 
-        # Compose message; preserve existing trailers at footer
-        # (Signed-off-by, Change-Id)
+        # Get current commit message with all trailers
         current_body = git_show("HEAD", fmt="%B", cwd=self.workspace)
-        # Extract existing trailers from current commit body
-        lines_cur = current_body.splitlines()
-        signed_lines = [
-            ln for ln in lines_cur if ln.startswith("Signed-off-by:")
+
+        # Split into message body and trailer block
+        # Trailers are the lines at the end that match "Key: Value" format
+        lines = current_body.split("\n")
+
+        # Find where trailers start (working backwards from the end)
+        trailer_start_idx = len(lines)
+        trailer_keywords = [
+            "Issue-ID:",
+            "Signed-off-by:",
+            "Change-Id:",
+            "GitHub-PR:",
+            "GitHub-Hash:",
+            "Co-authored-by:",
         ]
-        change_id_lines = [
-            ln for ln in lines_cur if ln.startswith("Change-Id:")
-        ]
 
-        # Build base message with PR title/body plus existing Signed-off-by
-        if title or body:
-            msg_parts = [title, "", body]
-            # Include Signed-off-by trailers in the base message
-            # so centralized function can preserve them
-            if signed_lines:
-                msg_parts.append("")
-                msg_parts.extend(signed_lines)
-            base_message = "\n".join(msg_parts).strip()
-        else:
-            base_message = current_body
+        # Find the first trailer line from the end
+        found_trailer_block = False
+        for i in range(len(lines) - 1, -1, -1):
+            line = lines[i].strip()
+            if line and any(line.startswith(kw) for kw in trailer_keywords):
+                trailer_start_idx = i
+                found_trailer_block = True
+            elif found_trailer_block and line:
+                # Found non-trailer after trailers, stop
+                break
 
-        # Determine Change-ID to preserve
-        change_id_to_use = None
-        if change_id_lines:
-            change_id_to_use = (
-                change_id_lines[-1].replace("Change-Id: ", "").strip()
-            )
+        # Extract existing trailers
+        existing_trailers = []
+        if found_trailer_block:
+            existing_trailers = lines[trailer_start_idx:]
 
-        # Use centralized function to build complete message
-        # with all trailers
-        commit_message = self._build_commit_message_with_trailers(
-            base_message=base_message,
-            inputs=inputs,
-            gh=gh,
-            change_id=change_id_to_use,
-            preserve_existing=True,
-        )
+        # Build new message: title + body + preserved trailers
+        new_message_parts = []
+        if title:
+            new_message_parts.append(title)
+        if body:
+            if title:
+                new_message_parts.append(
+                    ""
+                )  # Blank line between title and body
+            new_message_parts.append(body)
 
+        # Add preserved trailers
+        if existing_trailers:
+            # Ensure blank line before trailers
+            new_message_parts.append("")
+            new_message_parts.extend(existing_trailers)
+
+        commit_message = "\n".join(new_message_parts).strip()
+
+        # Get current author
         author = run_cmd(
             ["git", "show", "-s", "--pretty=format:%an <%ae>", "HEAD"],
             cwd=self.workspace,
             env=self._ssh_env(),
         ).stdout.strip()
+
+        # Check if Signed-off-by exists
+        has_signoff = any(
+            line.strip().startswith("Signed-off-by:")
+            for line in existing_trailers
+        )
+
+        # Amend commit with new message, preserving trailers
         git_commit_amend(
             cwd=self.workspace,
             no_edit=False,
-            signoff=not bool(signed_lines),
+            signoff=not has_signoff,  # Only add signoff if not already present
             author=author,
             message=commit_message,
         )
+
         # Collect Change-Id trailers for later comment emission
         try:
             trailers_after = git_last_commit_trailers(
@@ -3469,7 +4300,7 @@ class Orchestrator:
         )
 
     def _prepare_workspace_checkout(
-        self, inputs: Inputs, gh: GitHubContext
+        self, *, inputs: Inputs, gh: GitHubContext
     ) -> None:
         """Initialize and set up git workspace using battle-tested CLI logic."""
         from .gitutils import run_cmd
@@ -4399,6 +5230,15 @@ class Orchestrator:
         if not gh.pr_number:
             return
         urls = result.change_urls or []
+
+        # Determine operation type for comment
+        operation_mode = os.getenv("G2G_OPERATION_MODE", "unknown")
+        operation_verb = "raised"
+        if operation_mode == "update":
+            operation_verb = "updated"
+        elif operation_mode == "edit":
+            operation_verb = "synchronized"
+
         try:
             client = build_client()
             repo = get_repo_from_env(client)
@@ -4408,7 +5248,7 @@ class Orchestrator:
             for u in urls:
                 create_pr_comment(
                     pr_obj,
-                    f"Change raised in Gerrit by GitHub2Gerrit: {u}",
+                    f"Change {operation_verb} in Gerrit by GitHub2Gerrit: {u}",
                 )
         except Exception as exc:
             log.warning("Failed to add PR comment: %s", exc)
@@ -4424,7 +5264,7 @@ class Orchestrator:
         # Respect PRESERVE_GITHUB_PRS to avoid closing PRs during tests
         preserve = os.getenv("PRESERVE_GITHUB_PRS", "").strip().lower()
         if preserve in ("1", "true", "yes"):
-            log.info(
+            log.debug(
                 "PRESERVE_GITHUB_PRS is enabled; skipping PR close for #%s",
                 gh.pr_number,
             )
@@ -5056,5 +5896,3 @@ class Orchestrator:
 # ---------------------
 # Utility functions
 # ---------------------
-
-# moved _is_valid_change_id above its first use

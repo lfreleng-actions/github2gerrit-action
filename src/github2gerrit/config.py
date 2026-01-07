@@ -95,6 +95,7 @@ KNOWN_KEYS: set[str] = {
     # Reconciliation configuration
     "REUSE_STRATEGY",
     "SIMILARITY_SUBJECT",
+    "SIMILARITY_UPDATE_FACTOR",
     "SIMILARITY_FILES",
     "ALLOW_ORPHAN_CHANGES",
     "PERSIST_SINGLE_MAPPING_COMMENT",
@@ -453,7 +454,9 @@ def _is_local_cli_context() -> bool:
     return not _is_github_actions_context()
 
 
-def derive_gerrit_parameters(organization: str | None) -> dict[str, str]:
+def derive_gerrit_parameters(
+    organization: str | None, repository: str | None = None
+) -> dict[str, str]:
     """Derive Gerrit parameters using SSH config, git config, and org fallback.
 
     Priority order for credential derivation:
@@ -463,12 +466,14 @@ def derive_gerrit_parameters(organization: str | None) -> dict[str, str]:
 
     Args:
         organization: GitHub organization name for fallback
+        repository: GitHub repository in owner/repo format (optional)
 
     Returns:
         Dict with derived parameter values:
         - GERRIT_SSH_USER_G2G: From SSH config or [org].gh2gerrit
         - GERRIT_SSH_USER_G2G_EMAIL: From git config or fallback email
         - GERRIT_SERVER: Resolved from config or gerrit.[org].org
+        - GERRIT_PROJECT: Derived from repository name if provided
     """
     if not organization:
         return {}
@@ -482,6 +487,14 @@ def derive_gerrit_parameters(organization: str | None) -> dict[str, str]:
     # Determine the gerrit server to use for SSH config lookup
     gerrit_host = configured_server or f"gerrit.{org}.org"
 
+    # Derive GERRIT_PROJECT from repository if provided
+    gerrit_project = ""
+    if repository and "/" in repository:
+        # Extract repo name from owner/repo format
+        # For lfit/sandbox -> sandbox
+        _owner, repo_name = repository.split("/", 1)
+        gerrit_project = repo_name
+
     # Try to use SSH config and git config for personalized credentials
     try:
         from .ssh_config_parser import derive_gerrit_credentials
@@ -489,35 +502,45 @@ def derive_gerrit_parameters(organization: str | None) -> dict[str, str]:
         ssh_user, git_email = derive_gerrit_credentials(gerrit_host, org)
     except ImportError:
         # Fallback to original behavior if ssh_config_parser not available
-        return {
+        result = {
             "GERRIT_SSH_USER_G2G": f"{org}.gh2gerrit",
             "GERRIT_SSH_USER_G2G_EMAIL": (
                 f"releng+{org}-gh2gerrit@linuxfoundation.org"
             ),
             "GERRIT_SERVER": gerrit_host,
         }
+        if gerrit_project:
+            result["GERRIT_PROJECT"] = gerrit_project
+        return result
     else:
-        return {
+        result = {
             "GERRIT_SSH_USER_G2G": ssh_user or f"{org}.gh2gerrit",
             "GERRIT_SSH_USER_G2G_EMAIL": git_email
             or (f"releng+{org}-gh2gerrit@linuxfoundation.org"),
             "GERRIT_SERVER": gerrit_host,
         }
+        if gerrit_project:
+            result["GERRIT_PROJECT"] = gerrit_project
+        return result
 
 
 def apply_parameter_derivation(
     cfg: dict[str, str],
     organization: str | None = None,
+    repository: str | None = None,
     save_to_config: bool = True,
 ) -> dict[str, str]:
     """Apply dynamic parameter derivation for missing Gerrit parameters.
 
     This function derives standard Gerrit parameters when they are not
-    explicitly configured. The derivation is based on the GitHub organization:
+    explicitly configured. The derivation is based on the GitHub organization
+    and repository:
 
     - gerrit_ssh_user_g2g: [org].gh2gerrit
     - gerrit_ssh_user_g2g_email: releng+[org]-gh2gerrit@linuxfoundation.org
     - gerrit_server: gerrit.[org].org
+    - gerrit_project: Derived from repository name
+      (e.g., lfit/sandbox -> sandbox)
 
     Derivation behavior:
     - Default: Automatic derivation enabled (G2G_ENABLE_DERIVATION=true by
@@ -527,6 +550,7 @@ def apply_parameter_derivation(
     Args:
         cfg: Configuration dictionary to augment
         organization: GitHub organization name for derivation
+        repository: GitHub repository in owner/repo format (optional)
         save_to_config: Whether to save derived parameters to config file
 
     Returns:
@@ -554,7 +578,7 @@ def apply_parameter_derivation(
         return cfg
 
     # Only derive parameters that are missing or empty
-    derived = derive_gerrit_parameters(organization)
+    derived = derive_gerrit_parameters(organization, repository)
     result = dict(cfg)
     newly_derived = {}
 

@@ -244,7 +244,8 @@ def test_reconcile_file_signature_fallback():
     ]
 
     matcher = ReconciliationMatcher(
-        similarity_threshold=0.95
+        similarity_threshold=0.95,
+        require_file_match=True,  # Enable file signature matching for this test
     )  # High to avoid Pass D fallback
     result = matcher.reconcile(local_commits, gerrit_changes)
 

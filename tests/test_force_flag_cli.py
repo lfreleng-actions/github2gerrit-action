@@ -72,15 +72,18 @@ def mock_github_context():
 class TestForceFlag:
     """Tests for --force flag behavior with Gerrit change URLs."""
 
+    @patch("github2gerrit.cli.extract_pr_url_from_gerrit_change")
     @patch("github2gerrit.cli.check_gerrit_change_status")
     def test_merged_change_without_force_raises_error(
         self,
         mock_check_status,
+        mock_extract_pr,
         mock_inputs,
         mock_github_context,
     ):
         """Test that MERGED change without --force raises an error."""
         mock_check_status.return_value = "MERGED"
+        mock_extract_pr.return_value = "https://github.com/owner/repo/pull/123"
         gerrit_url = "https://gerrit.example.org/c/project/+/12345"
 
         with pytest.raises(GitHub2GerritError) as exc_info:
@@ -95,15 +98,18 @@ class TestForceFlag:
         assert "already MERGED" in str(exc_info.value.message)
         assert "--force" in str(exc_info.value.message)
 
+    @patch("github2gerrit.cli.extract_pr_url_from_gerrit_change")
     @patch("github2gerrit.cli.check_gerrit_change_status")
     def test_abandoned_change_without_force_raises_error(
         self,
         mock_check_status,
+        mock_extract_pr,
         mock_inputs,
         mock_github_context,
     ):
         """Test that ABANDONED change without --force raises an error."""
         mock_check_status.return_value = "ABANDONED"
+        mock_extract_pr.return_value = "https://github.com/owner/repo/pull/123"
         gerrit_url = "https://gerrit.example.org/c/project/+/12345"
 
         with pytest.raises(GitHub2GerritError) as exc_info:
@@ -247,21 +253,18 @@ class TestForceFlag:
         mock_close_pr.assert_called_once()
 
     @patch("github2gerrit.cli.extract_pr_url_from_gerrit_change")
-    @patch("github2gerrit.cli.check_gerrit_change_status")
     def test_merged_change_no_pr_url_returns_early(
         self,
-        mock_check_status,
         mock_extract_pr,
         mock_inputs,
         mock_github_context,
     ):
-        """Test that function returns early when no PR URL is found, even with force."""
-        mock_check_status.return_value = "MERGED"
+        """Test that function returns early when no PR URL is found (no GitHub origin)."""
         mock_extract_pr.return_value = None  # No PR URL found
 
         gerrit_url = "https://gerrit.example.org/c/project/+/12345"
 
-        # Should not raise an error but should return early
+        # Should not raise an error but should return early with no-op message
         _process_close_gerrit_change(
             mock_inputs,
             mock_github_context,
@@ -269,5 +272,5 @@ class TestForceFlag:
             force=True,
         )
 
-        # No further processing should occur
+        # Should check for PR URL and return early
         mock_extract_pr.assert_called_once()

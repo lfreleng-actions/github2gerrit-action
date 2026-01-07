@@ -12,9 +12,10 @@ from __future__ import annotations
 
 import logging
 import re
-import sys
 from enum import IntEnum
 from typing import NoReturn
+
+import typer
 
 from .rich_display import safe_console_print
 
@@ -116,7 +117,15 @@ class GitHub2GerritError(Exception):
     def display_and_exit(self) -> NoReturn:
         """Display the error message and exit with the appropriate code."""
         # Log the error with details
-        if self.original_exception:
+        # Don't show raw exception for known error types - just the message
+        exception_type = (
+            type(self.original_exception).__name__
+            if self.original_exception
+            else None
+        )
+
+        # Skip showing exception details for known orchestrator errors
+        if self.original_exception and exception_type != "OrchestratorError":
             log.error(
                 "Exit code %d: %s (Exception: %s)",
                 self.exit_code,
@@ -138,7 +147,7 @@ class GitHub2GerritError(Exception):
                 f"Details: {self.details}", style="dim red", err=True
             )
 
-        sys.exit(int(self.exit_code))
+        raise typer.Exit(int(self.exit_code))
 
 
 def exit_with_error(

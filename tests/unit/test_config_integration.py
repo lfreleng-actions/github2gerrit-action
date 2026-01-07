@@ -208,7 +208,7 @@ class TestApplyParameterDerivation:
             "GERRIT_SSH_USER_G2G_EMAIL": "derived@example.com",
         }
         assert result == expected
-        mock_derive.assert_called_once_with("testorg")
+        mock_derive.assert_called_once_with("testorg", None)
 
     @mock.patch("github2gerrit.config.derive_gerrit_parameters")
     @mock.patch("github2gerrit.config._is_github_actions_context")
