@@ -8,6 +8,12 @@ name: 'Python Build/Test'
 # yamllint disable-line rule:truthy
 on:
   workflow_dispatch:
+    inputs:
+      clear_cache:
+        description: 'Clear all Python dependency caches'
+        type: boolean
+        default: false
+        required: false
   pull_request:
     types: [opened, reopened, edited, synchronize]
     branches:
@@ -23,9 +29,39 @@ concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"
   cancel-in-progress: true
 
-permissions: {}
+permissions:
+  actions: write  # Required for cache deletion when clear_cache is true
 
 jobs:
+  repository-metadata:
+    name: "Repository Metadata"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    timeout-minutes: 5
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: step-security/harden-runner@a90bcbc6539c36a85cdfeb73f7e2f433735f215b  # v2.15.0
+        with:
+          egress-policy: audit
+
+      # yamllint disable-line rule:line-length
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: "Gather repository metadata"
+        id: repo-metadata
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/repository-metadata-action@ceabcd987d13d7bfefd2372e01eebb0ddac45956  # v0.2.0
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          github_summary: 'true'
+          gerrit_summary: 'false'
+          artifact_upload: 'true'
+          artifact_formats: 'json'
+
   python-build:
     name: 'Python Build'
     runs-on: 'ubuntu-latest'
@@ -35,23 +71,26 @@ jobs:
       artefact_path: "${{ steps.python-build.outputs.artefact_path }}"
     permissions:
       contents: read
+      actions: write  # Required for cache deletion when clear_cache is true
     timeout-minutes: 12
     env:
       GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
     steps:
       # Harden the runner used by this workflow
       # yamllint disable-line rule:line-length
-      - uses: step-security/harden-runner@a90bcbc6539c36a85cdfeb73f7e2f433735f215b # v2.15.0
+      - uses: step-security/harden-runner@a90bcbc6539c36a85cdfeb73f7e2f433735f215b  # v2.15.0
         with:
           egress-policy: 'audit'
 
       # yamllint disable-line rule:line-length
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
       - name: 'Build Python project'
         id: python-build
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/python-build-action@8e55c263713b2d2c8347c1d267e75b2a886d570a # v1.0.3
+        uses: lfreleng-actions/python-build-action@8e55c263713b2d2c8347c1d267e75b2a886d570a  # v1.0.3
+        with:
+          clear_cache: ${{ github.event.inputs.clear_cache || 'false' }}
 
   python-tests:
     name: 'Python Tests'
@@ -67,16 +106,16 @@ jobs:
     steps:
       # Harden the runner used by this workflow
       # yamllint disable-line rule:line-length
-      - uses: step-security/harden-runner@a90bcbc6539c36a85cdfeb73f7e2f433735f215b # v2.15.0
+      - uses: step-security/harden-runner@a90bcbc6539c36a85cdfeb73f7e2f433735f215b  # v2.15.0
         with:
           egress-policy: audit
 
       # yamllint disable-line rule:line-length
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
       - name: "Python tests [pytest] ${{ matrix.python-version }}"
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/python-test-action@92d4110d44ebc18fa4575c6b00203ff67d01a1cb # v1.0.1
+        uses: lfreleng-actions/python-test-action@92d4110d44ebc18fa4575c6b00203ff67d01a1cb  # v1.0.1
         with:
           python_version: ${{ matrix.python-version }}
 
@@ -94,19 +133,18 @@ jobs:
     steps:
       # Harden the runner used by this workflow
       # yamllint disable-line rule:line-length
-      - uses: step-security/harden-runner@a90bcbc6539c36a85cdfeb73f7e2f433735f215b # v2.15.0
+      - uses: step-security/harden-runner@a90bcbc6539c36a85cdfeb73f7e2f433735f215b  # v2.15.0
         with:
           egress-policy: 'audit'
 
       # yamllint disable-line rule:line-length
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
       - name: "Audit dependencies ${{ matrix.python-version }}"
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/python-audit-action@ec8d84ca14c0413a2b2c6612a3e15b9803f9de75 # v0.2.5
+        uses: lfreleng-actions/python-audit-action@ec8d84ca14c0413a2b2c6612a3e15b9803f9de75  # v0.2.5
         with:
           python_version: "${{ matrix.python-version }}"
-          permit_fail: true  # Allow failure for development packages not on PyPI
 
   sbom:
     name: 'Generate SBOM'
@@ -141,9 +179,9 @@ jobs:
         # yamllint disable-line rule:line-length
         uses: anchore/scan-action@7037fa011853d5a11690026fb85feee79f4c946c  # v7.3.2
         id: grype-sarif
-        # The first Grype audit should not be blocking and should never fail
-        # That way we always get the required artefact; the second job will
-        # exit with an error, as required (below)
+        # The first Grype scan should not abort the job on failure so that
+        # subsequent steps can collect artefacts and display human-readable
+        # results; the final check step will fail the job if needed
         continue-on-error: true
         with:
           sbom: "${{ steps.sbom.outputs.sbom_json_path }}"
@@ -194,9 +232,12 @@ jobs:
               cat grype-results.txt
             fi
 
-      - name: "Fail on Grype findings"
+      - name: "Check Grype scan results"
         if: steps.grype-sarif.outcome == 'failure'
         run: |
-            # Fail on Grype findings
-            echo "::error::Grype vulnerability scan found issues (see SARIF and table output above)"
+            # Check Grype scan results
+            echo "::error::Grype found vulnerabilities" \
+              "at or above severity threshold"
+            echo "Review the Grype Summary above or download the" \
+              "grype-scan-results artifact for details"
             exit 1

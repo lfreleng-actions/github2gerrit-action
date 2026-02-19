@@ -73,19 +73,10 @@ jobs:
         with:
           token: "${{ secrets.GITHUB_TOKEN }}"
           require_type: 'semver'
+          reject_development: 'true'
           require_github: 'true'
           # yamllint disable-line rule:line-length
           require_signed: 'ssh,gpg-unverifiable'  # Cannot verify GPG without key
-
-      - name: 'Reject development tags'
-        if: steps.tag-validate.outputs.development_tag == 'true'
-        shell: bash
-        run: |
-          # Reject development tags
-          echo "Development tag pushed; aborting release workflow 🛑"
-          echo "Development tag pushed; aborting release workflow 🛑" \
-            >> "$GITHUB_STEP_SUMMARY"
-          exit 1
 
       - name: 'Ensure draft release exists'
         id: 'ensure-release'
@@ -207,6 +198,12 @@ jobs:
     permissions:
       contents: read
     steps:
+      # Harden the runner used by this workflow
+      # yamllint disable-line rule:line-length
+      - uses: step-security/harden-runner@a90bcbc6539c36a85cdfeb73f7e2f433735f215b  # v2.15.0
+        with:
+          egress-policy: 'audit'
+
       # yamllint disable-line rule:line-length
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
@@ -232,9 +229,9 @@ jobs:
         # yamllint disable-line rule:line-length
         uses: anchore/scan-action@7037fa011853d5a11690026fb85feee79f4c946c  # v7.3.2
         id: grype-sarif
-        # The first Grype audit should not be blocking and should never fail
-        # That way we always get the required artefact; the second job will
-        # exit with an error, as required (below)
+        # The first Grype scan should not abort the job on failure so that
+        # subsequent steps can collect artefacts and display human-readable
+        # results; the final check step will fail the job if needed
         continue-on-error: true
         with:
           sbom: "${{ steps.sbom.outputs.sbom_json_path }}"
@@ -251,6 +248,8 @@ jobs:
           sbom: "${{ steps.sbom.outputs.sbom_json_path }}"
           output-format: "table"
           output-file: "grype-results.txt"
+          # Differs from build-test.yaml, which requires fixes to be applied
+          # Deliberately set to not block releases if/when tags are pushed
           fail-build: "false"
 
       - name: "Upload Grype scan results"
@@ -268,10 +267,32 @@ jobs:
         if: always()
         run: |
             # Grype summary
-            echo "## Grype Summary" >> "$GITHUB_STEP_SUMMARY"
-            [ -f grype-results.txt ] && cat grype-results.txt \
-              >> "$GITHUB_STEP_SUMMARY" || echo "No scan results available" \
-              >> "$GITHUB_STEP_SUMMARY"
+            {
+              echo "## SBOM Summary"
+              echo "SBOM count: ${{ steps.sbom.outputs.component_count }}"
+              echo "Tool used: ${{ steps.sbom.outputs.dependency_manager }}"
+              echo ""
+              echo "## Grype Vulnerability Scan"
+              if [ -f grype-results.txt ]; then
+                cat grype-results.txt
+              else
+                echo "No scan results available"
+              fi
+            } >> "$GITHUB_STEP_SUMMARY"
+            if [ -f grype-results.txt ]; then
+              echo "--- Grype scan results ---"
+              cat grype-results.txt
+            fi
+
+      - name: "Check Grype scan results"
+        if: steps.grype-sarif.outcome == 'failure'
+        run: |
+            # Check Grype scan results
+            echo "::error::Grype found vulnerabilities" \
+              "at or above severity threshold"
+            echo "Review the Grype Summary above or download the" \
+              "grype-scan-results artifact for details"
+            exit 1
 
   test-pypi:
     name: 'Test PyPI Publishing'
@@ -380,7 +401,8 @@ jobs:
       contents: write  # IMPORTANT: needed for draft release promotion
     timeout-minutes: 2
     outputs:
-      release_url: "${{ steps.promote-release.outputs.release_url }}"
+      # yamllint disable-line rule:line-length
+      release_url: "${{ steps.promote-release.outputs.release_url || steps.set-promoted-url.outputs.release_url }}"
     steps:
       # Harden the runner used by this workflow
       # yamllint disable-line rule:line-length
@@ -419,6 +441,7 @@ jobs:
           latest: true
 
       - name: 'Set release URL for already promoted release'
+        id: 'set-promoted-url'
         if: steps.check-promoted.outputs.already_promoted == 'true'
         shell: bash
         env:
