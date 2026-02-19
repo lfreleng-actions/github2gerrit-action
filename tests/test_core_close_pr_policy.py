@@ -58,16 +58,16 @@ def test_close_pr_skipped_when_preserve_github_prs_true(
     orch._close_pull_request_if_required(gh)
 
 
-def test_close_pr_not_invoked_for_non_target_event(
+def test_close_pr_not_invoked_for_non_pr_event(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Ensure preservation is disabled so only event controls behavior
     monkeypatch.delenv("PRESERVE_GITHUB_PRS", raising=False)
 
-    # Non-target event should not attempt to close
+    # Non-PR events (e.g. workflow_dispatch, push) should not attempt to close
     def _fail(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError(
-            "GitHub API should not be called for non-target events"
+            "GitHub API should not be called for non-PR events"
         )
 
     monkeypatch.setattr("github2gerrit.core.build_client", _fail)
@@ -76,10 +76,64 @@ def test_close_pr_not_invoked_for_non_target_event(
     monkeypatch.setattr("github2gerrit.core.close_pr", _fail)
 
     orch = Orchestrator(workspace=tmp_path)
+    gh = _gh_ctx(event_name="workflow_dispatch", pr_number=42)
+
+    # Act: should no-op for non-PR events
+    orch._close_pull_request_if_required(gh)
+
+
+def test_close_pr_invoked_for_pull_request_event(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify that pull_request events (not just pull_request_target) close PRs.
+
+    The code now supports both ``pull_request`` and ``pull_request_target``
+    triggers.  Using ``pull_request`` is preferred for security.
+    """
+    # Ensure preservation is disabled so closing is allowed
+    monkeypatch.delenv("PRESERVE_GITHUB_PRS", raising=False)
+
+    calls: dict[str, Any] = {}
+
+    class DummyClient:
+        pass
+
+    class DummyRepo:
+        pass
+
+    class DummyPR:
+        def __init__(self, number: int) -> None:
+            self.number = number
+            self.closed_state: str | None = None
+
+    # Patch the GitHub helper functions used by the close path
+    monkeypatch.setattr("github2gerrit.core.build_client", DummyClient)
+    monkeypatch.setattr(
+        "github2gerrit.core.get_repo_from_env", lambda _c: DummyRepo()
+    )
+
+    def _get_pull(_repo: DummyRepo, number: int) -> DummyPR:
+        calls["get_pull_number"] = number
+        return DummyPR(number)
+
+    def _close_pr(pr: DummyPR, *, comment: str | None = None) -> None:
+        calls["closed_pr_number"] = pr.number
+        calls["comment"] = comment
+        pr.closed_state = "closed"
+
+    monkeypatch.setattr("github2gerrit.core.get_pull", _get_pull)
+    monkeypatch.setattr("github2gerrit.core.close_pr", _close_pr)
+
+    orch = Orchestrator(workspace=tmp_path)
     gh = _gh_ctx(event_name="pull_request", pr_number=42)
 
-    # Act: should no-op
+    # Act: pull_request events should now close the PR
     orch._close_pull_request_if_required(gh)
+
+    # Assert
+    assert calls.get("get_pull_number") == 42
+    assert calls.get("closed_pr_number") == 42
+    assert calls.get("comment") == "Auto-closing pull request"
 
 
 def test_close_pr_invoked_for_pull_request_target_event(
