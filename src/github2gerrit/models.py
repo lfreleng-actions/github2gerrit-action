@@ -117,10 +117,15 @@ class GitHubContext:
     def get_operation_mode(self) -> PROperationMode:
         """Determine the operation mode based on event type and action.
 
+        Supports both ``pull_request`` and ``pull_request_target`` triggers.
+        Using ``pull_request`` is preferred for security (avoids granting
+        secrets to untrusted fork code), while ``pull_request_target`` is
+        accepted for backward compatibility.
+
         Returns:
             PROperationMode enum indicating the type of operation
         """
-        if self.event_name != "pull_request_target":
+        if self.event_name not in ("pull_request", "pull_request_target"):
             return PROperationMode.UNKNOWN
 
         action = self.event_action.lower() if self.event_action else ""

@@ -3424,7 +3424,7 @@ class Orchestrator:
             )
             if (
                 not sync_all_prs
-                and gh.event_name == "pull_request_target"
+                and gh.event_name in ("pull_request", "pull_request_target")
                 and gh.event_action in ("reopened", "synchronize")
             ):
                 try:
@@ -5518,8 +5518,9 @@ class Orchestrator:
         self,
         gh: GitHubContext,
     ) -> None:
-        """Close the PR if policy requires (pull_request_target events).
+        """Close the PR if policy requires (pull_request events).
 
+        Supports both ``pull_request`` and ``pull_request_target`` triggers.
         When PRESERVE_GITHUB_PRS is true, skip closing PRs (useful for testing).
         """
         # Respect PRESERVE_GITHUB_PRS to avoid closing PRs during tests
@@ -5530,9 +5531,9 @@ class Orchestrator:
                 gh.pr_number,
             )
             return
-        # The current shell action closes PR on pull_request_target events.
-        if gh.event_name != "pull_request_target":
-            log.debug("Event is not pull_request_target; not closing PR")
+        # Close PRs on pull_request or pull_request_target events.
+        if gh.event_name not in ("pull_request", "pull_request_target"):
+            log.debug("Event is not a pull_request event; not closing PR")
             return
         log.info("Closing PR #%s", gh.pr_number)
         try:

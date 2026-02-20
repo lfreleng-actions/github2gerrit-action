@@ -137,14 +137,66 @@ jobs:
             sbom-cyclonedx.xml
           retention-days: 45
 
-      - name: "Security scan with Grype"
+      - name: "Security scan with Grype (SARIF)"
         # yamllint disable-line rule:line-length
         uses: anchore/scan-action@7037fa011853d5a11690026fb85feee79f4c946c  # v7.3.2
+        id: grype-sarif
+        # The first Grype audit should not be blocking and should never fail
+        # That way we always get the required artefact; the second job will
+        # exit with an error, as required (below)
+        continue-on-error: true
         with:
           sbom: "${{ steps.sbom.outputs.sbom_json_path }}"
+          output-format: "sarif"
+          output-file: "grype-results.sarif"
+          fail-build: "true"
 
-      - name: "Summary step"
+      - name: "Security scan with Grype (Text/Table)"
+        # yamllint disable-line rule:line-length
+        uses: anchore/scan-action@7037fa011853d5a11690026fb85feee79f4c946c  # v7.3.2
+        id: grype-table
+        if: always()
+        with:
+          sbom: "${{ steps.sbom.outputs.sbom_json_path }}"
+          output-format: "table"
+          output-file: "grype-results.txt"
+          fail-build: "false"
+
+      - name: "Upload Grype scan results"
+        # yamllint disable-line rule:line-length
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+        if: always()
+        with:
+          name: grype-scan-results
+          path: |
+            grype-results.sarif
+            grype-results.txt
+          retention-days: 90
+
+      - name: "Grype summary"
+        if: always()
         run: |
-            # Summary step
-            echo "SBOM count: ${{ steps.sbom.outputs.component_count }}"
-            echo "Tool used: ${{ steps.sbom.outputs.dependency_manager }}"
+            # Grype summary
+            {
+              echo "## SBOM Summary"
+              echo "SBOM count: ${{ steps.sbom.outputs.component_count }}"
+              echo "Tool used: ${{ steps.sbom.outputs.dependency_manager }}"
+              echo ""
+              echo "## Grype Vulnerability Scan"
+              if [ -f grype-results.txt ]; then
+                cat grype-results.txt
+              else
+                echo "No scan results available"
+              fi
+            } >> "$GITHUB_STEP_SUMMARY"
+            if [ -f grype-results.txt ]; then
+              echo "--- Grype scan results ---"
+              cat grype-results.txt
+            fi
+
+      - name: "Fail on Grype findings"
+        if: steps.grype-sarif.outcome == 'failure'
+        run: |
+            # Fail on Grype findings
+            echo "::error::Grype vulnerability scan found issues (see SARIF and table output above)"
+            exit 1

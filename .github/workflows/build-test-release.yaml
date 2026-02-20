@@ -15,6 +15,9 @@ on:
 permissions: {}
 
 jobs:
+  # Debugging/troubleshooting job: collects repository metadata and uploads
+  # artifacts for workflow debugging and traceability.  Not a dependency of
+  # other jobs — runs in parallel and generates useful diagnostic output.
   repository-metadata:
     name: "Repository Metadata"
     runs-on: ubuntu-latest
