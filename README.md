@@ -101,6 +101,117 @@ If UPDATE fails to find existing change:
    To create a new change, trigger the 'opened' workflow action.
 ```
 
+## PR Comment Commands
+
+GitHub2Gerrit supports an extensible set of directives issued through
+pull request comments. Add a comment containing `@github2gerrit`
+followed by a command phrase and the tool will act on it during
+the next workflow run.
+
+### Command Format
+
+<!-- markdownlint-disable MD013 -->
+
+```text
+@github2gerrit <command>
+```
+
+<!-- markdownlint-enable MD013 -->
+
+- Commands are **case-insensitive** — `@github2gerrit Create Missing Change`
+  works the same as `@github2gerrit create missing change`.
+- Only the **latest** occurrence of each command takes effect when the same
+  command appears in more than one comment.
+- The tool logs unrecognised directives at debug level and ignores them.
+
+### Available Commands
+
+<!-- markdownlint-disable MD013 MD060 -->
+
+| Command | Aliases | Description |
+| --- | --- | --- |
+| `create missing change` | `create-missing`, `create missing` | Create a Gerrit change when an UPDATE operation cannot find an existing one |
+
+<!-- markdownlint-enable MD013 MD060 -->
+
+### Create Missing Change
+
+When a PR `synchronize` event fires, GitHub2Gerrit treats it as an
+**UPDATE** operation and expects a Gerrit change to exist. If the
+original `opened` event failed (for example due to a bug or transient
+error), no Gerrit change exists and every following update fails with:
+
+```text
+❌ UPDATE FAILED: Cannot update non-existent Gerrit change
+```
+
+The **create missing change** command resolves this without manual
+intervention in Gerrit. Two mechanisms trigger it:
+
+#### 1. PR Comment Directive
+
+Add a comment on the stuck pull request:
+
+```text
+@github2gerrit create missing change
+```
+
+Then re-trigger the workflow (push a trivial change or re-run the
+workflow manually). GitHub2Gerrit detects the directive, switches
+from UPDATE to CREATE mode, and pushes a new Gerrit change.
+
+#### 2. CLI Flag
+
+Outside GitHub Actions you can pass the flag directly:
+
+```shell
+github2gerrit \
+  --create-missing \
+  https://github.com/MyOrg/my-repo/pull/42
+```
+
+Or set the environment variable:
+
+```shell
+export G2G_CREATE_MISSING=true
+github2gerrit https://github.com/MyOrg/my-repo/pull/42
+```
+
+#### What Happens During Fallback
+
+1. The tool attempts the normal UPDATE flow and finds no existing
+   Gerrit change.
+2. It checks for `--create-missing` **or** scans PR comments for the
+   `@github2gerrit create missing change` directive.
+3. If authorised, the operation mode switches from UPDATE to CREATE.
+4. The tool posts a notice on the PR:
+
+   ```text
+   🔄 GitHub2Gerrit: No existing Gerrit change found for this PR.
+   Creating a new Gerrit change (fallback from UPDATE operation).
+   ```
+
+5. The pipeline continues as a normal CREATE — preparing commits,
+   pushing to Gerrit, posting the change URL back on the PR.
+
+#### GitHub Actions Workflow Example
+
+<!-- markdownlint-disable MD013 -->
+
+```yaml
+- name: Submit PR to Gerrit
+  uses: lfreleng-actions/github2gerrit-action@main
+  with:
+    GERRIT_SSH_PRIVKEY_G2G: ${{ secrets.GERRIT_SSH_PRIVKEY_G2G }}
+    CREATE_MISSING: "true"   # always allow fallback
+```
+
+<!-- markdownlint-enable MD013 -->
+
+> **Tip:** Setting `CREATE_MISSING` to `true` in your workflow means
+> stuck PRs self-heal on the next `synchronize` event without requiring
+> a comment directive.
+
 ## Close Merged PRs Feature
 
 GitHub2Gerrit now includes **automatic PR closure** when Gerrit merges changes

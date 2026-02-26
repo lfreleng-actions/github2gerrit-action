@@ -776,6 +776,16 @@ def main(
         "--version",
         help="Show version and exit.",
     ),
+    create_missing: bool = typer.Option(
+        False,
+        "--create-missing/--no-create-missing",
+        envvar="G2G_CREATE_MISSING",
+        help=(
+            "Create a Gerrit change when an UPDATE operation cannot find "
+            "an existing one. Also triggered by '@github2gerrit create "
+            "missing change' PR comment."
+        ),
+    ),
     automation_only: bool = typer.Option(
         True,
         "--automation-only/--no-automation-only",
@@ -859,6 +869,9 @@ def main(
 
     if os.getenv("LOG_RECONCILE_JSON"):
         log_reconcile_json = parse_bool_env(os.getenv("LOG_RECONCILE_JSON"))
+
+    if os.getenv("G2G_CREATE_MISSING"):
+        create_missing = parse_bool_env(os.getenv("G2G_CREATE_MISSING"))
 
     if os.getenv("AUTOMATION_ONLY"):
         automation_only = parse_bool_env(os.getenv("AUTOMATION_ONLY"))
@@ -1002,6 +1015,7 @@ def main(
         "true" if persist_single_mapping_comment else "false"
     )
     os.environ["LOG_RECONCILE_JSON"] = "true" if log_reconcile_json else "false"
+    os.environ["G2G_CREATE_MISSING"] = "true" if create_missing else "false"
     os.environ["AUTOMATION_ONLY"] = "true" if automation_only else "false"
     # URL mode handling
     if target_url:
@@ -1161,6 +1175,7 @@ def _build_inputs_from_env() -> Inputs:
             "PERSIST_SINGLE_MAPPING_COMMENT", True
         ),
         log_reconcile_json=env_bool("LOG_RECONCILE_JSON", True),
+        create_missing=env_bool("G2G_CREATE_MISSING", False),
     )
 
 
@@ -1781,6 +1796,7 @@ def _load_effective_inputs() -> Inputs:
                     allow_orphan_changes=data.allow_orphan_changes,
                     persist_single_mapping_comment=data.persist_single_mapping_comment,
                     log_reconcile_json=data.log_reconcile_json,
+                    create_missing=data.create_missing,
                 )
                 log.debug("Derived reviewers: %s", data.reviewers_email)
         except Exception as exc:

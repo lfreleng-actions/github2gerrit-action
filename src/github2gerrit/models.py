@@ -89,6 +89,9 @@ class Inputs:
         True  # Emit structured JSON reconciliation summary
     )
 
+    # Fallback behaviour: create Gerrit change on UPDATE when none exists
+    create_missing: bool = False  # --create-missing CLI flag
+
 
 @dataclass(frozen=True)
 class GitHubContext:

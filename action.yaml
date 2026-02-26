@@ -141,6 +141,10 @@ inputs:
     description: "Abandon Gerrit changes when their GitHub PRs are closed"
     required: false
     default: "true"
+  CREATE_MISSING:
+    description: "Create a Gerrit change when an UPDATE operation cannot find an existing one"
+    required: false
+    default: "false"
 
 outputs:
   gerrit_change_request_url:
@@ -300,6 +304,7 @@ runs:
         AUTOMATION_ONLY: ${{ inputs.AUTOMATION_ONLY }}
         CLEANUP_ABANDONED: ${{ inputs.CLEANUP_ABANDONED }}
         CLEANUP_GERRIT: ${{ inputs.CLEANUP_GERRIT }}
+        G2G_CREATE_MISSING: ${{ inputs.CREATE_MISSING }}
 
         # Optional Gerrit overrides (when .gitreview is missing)
         GERRIT_SERVER: ${{ inputs.GERRIT_SERVER }}
