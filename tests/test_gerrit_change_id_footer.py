@@ -214,7 +214,7 @@ def test_apply_pr_title_body_preserves_change_id_footer(
     first_trailer_idx = min(
         i
         for i, ln in enumerate(lines)
-        if ln.startswith(("Signed-off-by:", "Change-Id:"))
+        if ln.startswith(("Co-authored-by:", "Signed-off-by:", "Change-Id:"))
     )
     assert first_trailer_idx >= 2, (
         "Expected trailers to be separated by a blank line from body"

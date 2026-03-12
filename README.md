@@ -1457,6 +1457,33 @@ requiring manual configuration per PR or user.
   - By default, PRs are **preserved** after submission (`PRESERVE_GITHUB_PRS=true`).
   - Set `PRESERVE_GITHUB_PRS=false` to close PRs after submission on `pull_request_target` events.
 
+### NACR-Safe Author Handling
+
+When submitting changes to Gerrit, the tool handles git authorship to ensure
+compatibility with Gerrit's Non-Author Code Review (NACR) policy:
+
+- **Bot PRs** (Dependabot, pre-commit-ci, renovate, etc.): The tool keeps the
+  original bot identity as the git author. Since bots never review their own
+  changes, NACR does not apply.
+- **Human PRs**: The tool assigns the GitHub2Gerrit bot identity
+  (e.g., `opendaylight.gh2gerrit`) as the git author and appends a
+  `Co-authored-by` trailer to the commit message, preserving attribution
+  to the original human author.
+
+This prevents the situation where a human PR author becomes the Gerrit change
+"owner" (Gerrit derives ownership from the git Author field), which would block
+them from approving their own change under NACR policy.
+
+Bot detection uses a three-level check:
+
+1. Exact match against a list of known automation accounts (e.g., `dependabot[bot]`,
+   `pre-commit-ci[bot]`, `renovate[bot]`, `github-actions[bot]`)
+2. GitHub `[bot]` suffix convention
+3. Word-boundary heuristic for bot-like usernames
+
+When the tool fails to determine the PR author (e.g., API failure), it
+conservatively treats the author as human to avoid NACR violations.
+
 ## Security notes
 
 - Do not hardcode secrets or keys. Provide the private key via the

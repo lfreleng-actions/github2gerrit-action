@@ -44,6 +44,7 @@ from typing import Any
 from urllib.request import Request
 from urllib.request import urlopen
 
+from .bot_detection import is_bot_author
 from .commit_normalization import normalize_commit_title
 from .gerrit_urls import create_gerrit_url_builder
 from .github_api import build_client
@@ -912,6 +913,7 @@ class Orchestrator:
         g2g_mode: str | None = None,
         g2g_topic: str | None = None,
         g2g_change_ids: list[str] | None = None,
+        extra_co_authored_by: str | None = None,
     ) -> str:
         """
         Build complete commit message with all trailers in proper order.
@@ -921,9 +923,10 @@ class Orchestrator:
         Trailer order:
         1. Issue-ID (if provided)
         2. Signed-off-by (preserved or added)
-        3. Change-ID (if provided or preserved)
-        4. GitHub-PR
-        5. GitHub-Hash
+        3. Co-authored-by (when NACR author swap is active)
+        4. Change-ID (if provided or preserved)
+        5. GitHub-PR
+        6. GitHub-Hash
 
         Args:
             base_message: The base commit message (subject + body)
@@ -936,6 +939,9 @@ class Orchestrator:
             g2g_mode: Mode for metadata block (squash/multi-commit)
             g2g_topic: Topic for metadata block
             g2g_change_ids: Change-IDs for metadata block
+            extra_co_authored_by: Optional Co-authored-by trailer to add
+                (used for NACR author swap — preserves human attribution
+                when bot is set as the git author)
 
         Returns:
             Complete commit message with all trailers properly ordered
@@ -1011,6 +1017,17 @@ class Orchestrator:
                 if sob_line not in seen_sob:
                     trailers_ordered.append(sob_line)
                     seen_sob.add(sob_line)
+
+        # 2b. Co-authored-by (NACR swap or preserved existing)
+        seen_coauth: set[str] = set()
+        if preserve_existing and "Co-authored-by" in existing_trailers:
+            for ca_val in existing_trailers["Co-authored-by"]:
+                ca_line = f"Co-authored-by: {ca_val}"
+                if ca_line not in seen_coauth:
+                    trailers_ordered.append(ca_line)
+                    seen_coauth.add(ca_line)
+        if extra_co_authored_by and extra_co_authored_by not in seen_coauth:
+            trailers_ordered.append(extra_co_authored_by)
 
         # 3. Change-ID
         if change_id:
@@ -3064,14 +3081,22 @@ class Orchestrator:
             create_branch=True,
         )
         change_ids: list[str] = []
+        # Fetch PR author login once for NACR-safe author resolution
+        pr_author_login = self._get_pr_author_login(gh)
         for idx, csha in enumerate(commit_list):
             run_cmd(["git", "checkout", tmp_branch], cwd=self.workspace)
             git_cherry_pick(csha, cwd=self.workspace)
-            # Preserve author of the original commit
-            author = run_cmd(
+            # Get original commit author
+            original_author = run_cmd(
                 ["git", "show", "-s", "--pretty=format:%an <%ae>", csha],
                 cwd=self.workspace,
             ).stdout.strip()
+            # NACR-safe: swap human authors to bot, keep bot authors as-is
+            author, co_authored_trailer = self._resolve_author_for_gerrit(
+                original_author,
+                pr_author_login,
+                inputs,
+            )
             git_commit_amend(
                 author=author, no_edit=True, signoff=True, cwd=self.workspace
             )
@@ -3111,6 +3136,7 @@ class Orchestrator:
                 g2g_mode="multi-commit",
                 g2g_topic=topic,
                 g2g_change_ids=reuse_change_ids if reuse_change_ids else None,
+                extra_co_authored_by=co_authored_trailer,
             )
 
             # Only amend if message changed
@@ -3482,20 +3508,31 @@ class Orchestrator:
         # Build base message with Signed-off-by
         base_msg = _compose_base_message(clean_lines, signed_off)
 
+        # Fetch PR author for NACR-safe resolution
+        pr_author_login = self._get_pr_author_login(gh)
+
         # Use centralized function to build complete message with all trailers
+        # (Co-authored-by is injected below after author resolution)
+        original_author = run_cmd(
+            ["git", "show", "-s", "--pretty=format:%an <%ae>", head_sha],
+            cwd=self.workspace,
+        ).stdout.strip()
+
+        # NACR-safe: swap human authors to bot, keep bot authors as-is
+        author, co_authored_trailer = self._resolve_author_for_gerrit(
+            original_author,
+            pr_author_login,
+            inputs,
+        )
+
         commit_msg = self._build_commit_message_with_trailers(
             base_message=base_msg,
             inputs=inputs,
             gh=gh,
             change_id=reuse_cid,
             preserve_existing=True,
+            extra_co_authored_by=co_authored_trailer,
         )
-
-        # Preserve primary author from the PR head commit
-        author = run_cmd(
-            ["git", "show", "-s", "--pretty=format:%an <%ae>", head_sha],
-            cwd=self.workspace,
-        ).stdout.strip()
 
         git_commit_new(
             message=commit_msg,
@@ -3664,12 +3701,29 @@ class Orchestrator:
 
         commit_message = "\n".join(new_message_parts).strip()
 
-        # Get current author
-        author = run_cmd(
+        # Get current author and resolve for NACR safety
+        original_author = run_cmd(
             ["git", "show", "-s", "--pretty=format:%an <%ae>", "HEAD"],
             cwd=self.workspace,
             env=self._ssh_env(),
         ).stdout.strip()
+        author, co_authored_trailer = self._resolve_author_for_gerrit(
+            original_author,
+            author_login,
+            inputs,
+        )
+
+        # Inject Co-authored-by trailer if NACR swap occurred
+        if co_authored_trailer:
+            # Insert before existing trailers
+            if existing_trailers:
+                # Find the blank line before trailers and insert after it
+                insert_idx = len(new_message_parts) - len(existing_trailers)
+                new_message_parts.insert(insert_idx, co_authored_trailer)
+            else:
+                new_message_parts.append("")
+                new_message_parts.append(co_authored_trailer)
+            commit_message = "\n".join(new_message_parts).strip()
 
         # Check if Signed-off-by exists
         has_signoff = any(
@@ -6083,6 +6137,89 @@ class Orchestrator:
             log.exception("Failed to gather debug context")
 
         log.error("=== End verbose merge failure analysis ===")
+
+    # -----------------------------------------------------------------
+    # NACR-safe author resolution
+    # -----------------------------------------------------------------
+    def _resolve_author_for_gerrit(
+        self,
+        original_author: str,
+        pr_author_login: str,
+        inputs: Inputs,
+    ) -> tuple[str, str | None]:
+        """Choose the git ``--author`` and optional Co-authored-by trailer.
+
+        When a *human* developer opens a GitHub PR and G2G pushes the
+        resulting commit to Gerrit, preserving the human as the git
+        author can trigger NACR (Non-Author Code-Review) restrictions,
+        preventing the developer from self-approving their own change.
+
+        For **bot** PRs (Dependabot, pre-commit-ci, etc.) we keep the
+        original author because bots never review their own changes and
+        maintainers need to see who actually produced the update.
+
+        Args:
+            original_author: ``Name <email>`` from ``git show --pretty``.
+            pr_author_login: GitHub ``user.login`` of the PR author.
+            inputs: Pipeline inputs (provides bot identity).
+
+        Returns:
+            A 2-tuple ``(author_for_commit, co_authored_by_trailer)``.
+            *co_authored_by_trailer* is ``None`` when no swap occurs.
+        """
+        if is_bot_author(pr_author_login):
+            log.debug(
+                "Bot PR author %r — preserving original author %s",
+                pr_author_login,
+                original_author,
+            )
+            return original_author, None
+
+        # Human PR — use the G2G bot identity as the commit author
+        # so the Gerrit change is "owned" by the bot, and the human
+        # can self-+2.
+        bot_name = inputs.gerrit_ssh_user_g2g or "github2gerrit-bot"
+        bot_email = (
+            inputs.gerrit_ssh_user_g2g_email or "github2gerrit@example.com"
+        )
+        bot_author = f"{bot_name} <{bot_email}>"
+
+        # Guard: if original_author already IS the bot (e.g. autosquash
+        # path where _prepare_squashed_commit already performed the swap),
+        # skip re-resolution to avoid a double-swap.
+        if original_author == bot_author:
+            log.debug(
+                "Author already set to bot %r — skipping duplicate NACR swap",
+                bot_author,
+            )
+            return original_author, None
+
+        co_authored_trailer = f"Co-authored-by: {original_author}"
+        log.info(
+            "NACR swap: human PR by %r — author set to bot identity",
+            pr_author_login,
+        )
+        log.debug("NACR trailer: %s", co_authored_trailer)
+        return bot_author, co_authored_trailer
+
+    def _get_pr_author_login(self, gh: GitHubContext) -> str:
+        """Fetch the GitHub login of the PR author.
+
+        Returns an empty string when the PR number is unknown or the API
+        call fails (conservative fallback: treat as human).
+        """
+        pr_num = gh.pr_number
+        if not pr_num:
+            return ""
+        try:
+            client = build_client()
+            repo = get_repo_from_env(client)
+            pr_obj = get_pull(repo, int(pr_num))
+            user = getattr(pr_obj, "user", None)
+            return getattr(user, "login", "") if user else ""
+        except Exception as exc:
+            log.debug("Failed to fetch PR author login: %s", exc)
+            return ""
 
     def _ensure_git_user_identity(self, inputs: Inputs) -> None:
         """Ensure git user identity is configured for merge operations."""
