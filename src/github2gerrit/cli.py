@@ -1620,8 +1620,9 @@ def _process_single(
                         progress_tracker=progress_tracker,
                     )
                     safe_console_print(
-                        "   To create a new change, trigger the 'opened' "
-                        "workflow action.",
+                        "   To create a new change, set CREATE_MISSING=true "
+                        "or add a '@github2gerrit create missing change' "
+                        "comment on the PR.",
                         style="yellow",
                         progress_tracker=progress_tracker,
                     )

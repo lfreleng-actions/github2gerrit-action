@@ -49,6 +49,8 @@ import configparser
 import logging
 import os
 import re
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import Any
 from typing import cast
@@ -454,10 +456,84 @@ def _is_local_cli_context() -> bool:
     return not _is_github_actions_context()
 
 
+def _read_gitreview_host(repository: str | None = None) -> str | None:
+    """Read the Gerrit host from the .gitreview file.
+
+    Checks the local workspace first (available after actions/checkout),
+    then falls back to fetching via raw.githubusercontent.com when a
+    GITHUB_REPOSITORY is set.
+
+    Args:
+        repository: GitHub repository in owner/repo format (optional).
+            Falls back to GITHUB_REPOSITORY env var.
+
+    Returns:
+        The host string from .gitreview, or None if unavailable.
+    """
+    _gitreview_host_re = re.compile(r"(?m)^host=(.+)$")
+
+    # 1. Try local .gitreview (available after actions/checkout)
+    local_path = Path(".gitreview")
+    if local_path.exists():
+        try:
+            text = local_path.read_text(encoding="utf-8")
+            match = _gitreview_host_re.search(text)
+            if match:
+                host = match.group(1).strip()
+                if host:
+                    log.debug(
+                        "Read Gerrit host from local .gitreview: %s", host
+                    )
+                    return host
+        except Exception as exc:
+            log.debug("Failed to read local .gitreview: %s", exc)
+
+    # 2. Try fetching from GitHub via raw URL
+    repo_full = (repository or os.getenv("GITHUB_REPOSITORY") or "").strip()
+    if not repo_full or "/" not in repo_full:
+        return None
+
+    for branch in ("master", "main"):
+        url = (
+            f"https://raw.githubusercontent.com/"
+            f"{repo_full}/refs/heads/{branch}/.gitreview"
+        )
+        parsed = urllib.parse.urlparse(url)
+        if (
+            parsed.scheme != "https"
+            or parsed.netloc != "raw.githubusercontent.com"
+        ):
+            continue
+        try:
+            with urllib.request.urlopen(url, timeout=5) as resp:  # noqa: S310
+                text = resp.read().decode("utf-8")
+            match = _gitreview_host_re.search(text)
+            if match:
+                host = match.group(1).strip()
+                if host:
+                    log.debug(
+                        "Read Gerrit host from remote .gitreview (%s): %s",
+                        branch,
+                        host,
+                    )
+                    return host
+        except Exception as exc:
+            log.debug(
+                "Failed to fetch .gitreview from %s branch: %s", branch, exc
+            )
+
+    return None
+
+
 def derive_gerrit_parameters(
     organization: str | None, repository: str | None = None
 ) -> dict[str, str]:
     """Derive Gerrit parameters using SSH config, git config, and org fallback.
+
+    Priority order for server derivation:
+    1. Per-org configuration file entry (GERRIT_SERVER)
+    2. .gitreview host field (local file or fetched from GitHub)
+    3. Heuristic fallback: gerrit.[org].org
 
     Priority order for credential derivation:
     1. SSH config user for gerrit.* hosts (checks generic and specific patterns)
@@ -472,7 +548,7 @@ def derive_gerrit_parameters(
         Dict with derived parameter values:
         - GERRIT_SSH_USER_G2G: From SSH config or [org].gh2gerrit
         - GERRIT_SSH_USER_G2G_EMAIL: From git config or fallback email
-        - GERRIT_SERVER: Resolved from config or gerrit.[org].org
+        - GERRIT_SERVER: Resolved from config, .gitreview, or gerrit.[org].org
         - GERRIT_PROJECT: Derived from repository name if provided
     """
     if not organization:
@@ -484,8 +560,22 @@ def derive_gerrit_parameters(
     config = load_org_config(org)
     configured_server = config.get("GERRIT_SERVER", "").strip()
 
-    # Determine the gerrit server to use for SSH config lookup
-    gerrit_host = configured_server or f"gerrit.{org}.org"
+    # Read .gitreview host only when no config file entry
+    # (avoid unnecessary I/O)
+    gitreview_host = (
+        _read_gitreview_host(repository) if not configured_server else None
+    )
+
+    # Priority: config file > .gitreview > heuristic fallback
+    gerrit_host = configured_server or gitreview_host or f"gerrit.{org}.org"
+
+    if gitreview_host and not configured_server:
+        log.debug(
+            "Using Gerrit host from .gitreview: %s (instead of heuristic "
+            "gerrit.%s.org)",
+            gitreview_host,
+            org,
+        )
 
     # Derive GERRIT_PROJECT from repository if provided
     gerrit_project = ""

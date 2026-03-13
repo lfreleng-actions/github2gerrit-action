@@ -1296,7 +1296,7 @@ class Orchestrator:
             topic = f"GH-{gh.repository_owner}-{repo_name}-{gh.pr_number}"
 
             msg = (
-                f"UPDATE operation requires existing Gerrit change, but "
+                f"UPDATE operation requires existing Gerrit change, but "  # noqa: S608
                 f"none found. "
                 f"PR #{gh.pr_number} should have an existing change with "
                 f"topic '{topic}'. "
@@ -1304,8 +1304,9 @@ class Orchestrator:
                 f"1. The PR was not previously processed by GitHub2Gerrit\n"
                 f"2. The Gerrit change was abandoned or deleted\n"
                 f"3. The topic was manually changed in Gerrit\n"
-                f"Consider using 'opened' event type or check Gerrit for "
-                f"the change."
+                f"To create a new change anyway, set CREATE_MISSING=true "
+                f"or add a '@github2gerrit create missing change' comment "
+                f"on the PR."
             )
             raise OrchestratorError(msg)
 
