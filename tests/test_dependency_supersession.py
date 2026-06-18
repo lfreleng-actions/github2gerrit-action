@@ -446,7 +446,15 @@ class TestQueryOpenChangesByProject:
     new=lambda *_a, **_kw: "",
 )
 class TestAbandonSupersededDependencyChanges:
-    """Tests for the post-push abandon sweep."""
+    """Tests for the post-push abandon sweep.
+
+    Note:
+        This class uses a class-level patch for
+        ``github2gerrit.gerrit_urls._discover_base_path_for_host`` so it
+        always returns ``""`` for every test method in this class. This keeps
+        URL/base-path discovery out of scope and makes abandon-sweep behavior
+        deterministic.
+    """
 
     @patch("github2gerrit.gerrit_rest.build_client_for_host")
     @patch("github2gerrit.gerrit_query.query_open_changes_by_project")
