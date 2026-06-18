@@ -107,7 +107,7 @@ def test_run_cmd_with_retries_retries_on_transient_error_then_succeeds(
     code = "\n".join(
         [
             "import sys, pathlib",
-            f"p = pathlib.Path({repr(str(marker))})",
+            f"p = pathlib.Path({str(marker)!r})",
             "if not p.exists():",
             '    p.write_text("1", encoding="utf-8")',
             '    print("could not resolve host: example.com", file=sys.stderr)',
