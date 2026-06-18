@@ -804,7 +804,7 @@ class TestStrategy5Integration:
 
         # Strategy 5 — return an open change bumping the same package
         existing_change = _gerrit_change(
-            change_id="Iexist00000000000000000000000000000000000",
+            change_id="I0123456789abcdef0123456789abcdef01234567",
             number="999",
             subject="chore: bump requests from 2.31.0 to 2.31.5",
         )
@@ -832,7 +832,7 @@ class TestStrategy5Integration:
         )
 
         result = orch._find_existing_change_for_pr(gh, gerrit)
-        assert result == ["Iexist00000000000000000000000000000000000"]
+        assert result == ["I0123456789abcdef0123456789abcdef01234567"]
 
     @patch("github2gerrit.core.build_client")
     @patch("github2gerrit.core.get_repo_from_env")
