@@ -264,6 +264,21 @@ def test_git_last_commit_trailers_parsing_edge_cases(
     ]
 
 
+def test_git_last_commit_trailers_returns_empty_on_git_show_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from github2gerrit.gitutils import GitError
+    from github2gerrit.gitutils import git_last_commit_trailers
+
+    def raise_git_error(rev: str, **kw: object) -> str:
+        raise GitError("simulated git_show failure")
+
+    monkeypatch.setattr("github2gerrit.gitutils.git_show", raise_git_error)
+
+    assert git_last_commit_trailers() == {}
+    assert git_last_commit_trailers(keys=["Change-Id"]) == {}
+
+
 def test_git_quiet_suppresses_failure_logging(
     caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
