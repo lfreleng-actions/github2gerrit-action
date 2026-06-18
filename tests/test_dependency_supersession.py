@@ -31,6 +31,13 @@ from github2gerrit.gerrit_query import query_open_changes_by_project
 from github2gerrit.gitreview import GerritInfo
 from github2gerrit.models import GitHubContext
 from github2gerrit.similarity import extract_dependency_package_from_subject
+from github2gerrit.utils import reset_warning_once
+
+
+@pytest.fixture(autouse=True)
+def _reset_warning_once_state() -> None:
+    """Reset one-time warning global state before each test."""
+    reset_warning_once()
 
 
 # -------------------------------------------------------------------
@@ -202,10 +209,6 @@ class TestQueryOpenChangesByProject:
         to drive the anonymous fallback, the helper must short-circuit and
         never issue the request, returning an empty list.
         """
-        from github2gerrit.utils import reset_warning_once
-
-        reset_warning_once()
-
         fake_client = MagicMock()
         fake_client.is_authenticated = False
 
@@ -446,7 +449,15 @@ class TestQueryOpenChangesByProject:
     new=lambda *_a, **_kw: "",
 )
 class TestAbandonSupersededDependencyChanges:
-    """Tests for the post-push abandon sweep."""
+    """Tests for the post-push abandon sweep.
+
+    Note:
+        This class uses a class-level patch for
+        ``github2gerrit.gerrit_urls._discover_base_path_for_host`` so it
+        always returns ``""`` for every test method in this class. This keeps
+        URL/base-path discovery out of scope and makes abandon-sweep behavior
+        deterministic.
+    """
 
     @patch("github2gerrit.gerrit_rest.build_client_for_host")
     @patch("github2gerrit.gerrit_query.query_open_changes_by_project")
@@ -786,10 +797,20 @@ class TestStrategy5Integration:
     ) -> None:
         """Strategy 5 should return Change-Id when package matches."""
 
+        package_name = "requests"
+        from_version = "2.31.0"
+        to_version = "2.32.0"
+        existing_to_version = "2.31.5"
+        pr_title = f"Bump {package_name} from {from_version} to {to_version}"
+        existing_subject = (
+            f"chore: bump {package_name} from {from_version} to {existing_to_version}"
+        )
+        head_ref = f"dependabot/pip/{package_name}-{to_version}"
+
         # Set up GitHub mocks — strategies 1-4 should all fail
         mock_get_pull.return_value = _FakePullRequest(
             number=42,
-            title="Bump requests from 2.31.0 to 2.32.0",
+            title=pr_title,
             user=_FakeGitHubUser(),
         )
         mock_get_repo.return_value = MagicMock()
@@ -804,9 +825,9 @@ class TestStrategy5Integration:
 
         # Strategy 5 — return an open change bumping the same package
         existing_change = _gerrit_change(
-            change_id="Iexist00000000000000000000000000000000000",
+            change_id="I0123456789abcdef0123456789abcdef01234567",
             number="999",
-            subject="chore: bump requests from 2.31.0 to 2.31.5",
+            subject=existing_subject,
         )
         mock_query_open.return_value = [existing_change]
 
@@ -822,7 +843,7 @@ class TestStrategy5Integration:
             run_id="1",
             sha="abc123",
             base_ref="main",
-            head_ref="dependabot/pip/requests-2.32.0",
+            head_ref=head_ref,
             pr_number=42,
         )
         gerrit = GerritInfo(
@@ -832,7 +853,7 @@ class TestStrategy5Integration:
         )
 
         result = orch._find_existing_change_for_pr(gh, gerrit)
-        assert result == ["Iexist00000000000000000000000000000000000"]
+        assert result == ["I0123456789abcdef0123456789abcdef01234567"]
 
     @patch("github2gerrit.core.build_client")
     @patch("github2gerrit.core.get_repo_from_env")
