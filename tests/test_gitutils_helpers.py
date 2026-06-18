@@ -16,19 +16,25 @@ from github2gerrit.gitutils import run_cmd
 from github2gerrit.gitutils import run_cmd_with_retries
 
 
+# Coverage/pytest-related environment variables are cleared for subprocess
+# invocations in these tests so child processes do not inherit instrumentation
+# settings from the parent pytest run. Inheriting them can make subprocess
+# behavior environment-dependent and flaky across local/CI setups.
+NO_COV_ENV_KEYS = (
+    "COV_CORE_SOURCE",
+    "COV_CORE_CONFIG",
+    "COV_CORE_DATAFILE",
+    "COVERAGE_PROCESS_START",
+    "COVERAGE_FILE",
+    "COVERAGE_RCFILE",
+    "PYTEST_ADDOPTS",
+    "PYTEST_CURRENT_TEST",
+    "PYTEST_XDIST_WORKER",
+)
+
+
 def _no_cov_env() -> dict[str, str]:
-    keys = [
-        "COV_CORE_SOURCE",
-        "COV_CORE_CONFIG",
-        "COV_CORE_DATAFILE",
-        "COVERAGE_PROCESS_START",
-        "COVERAGE_FILE",
-        "COVERAGE_RCFILE",
-        "PYTEST_ADDOPTS",
-        "PYTEST_CURRENT_TEST",
-        "PYTEST_XDIST_WORKER",
-    ]
-    return dict.fromkeys(keys, "")
+    return dict.fromkeys(NO_COV_ENV_KEYS, "")
 
 
 def test_mask_text_replaces_tokens_and_ignores_empty() -> None:
