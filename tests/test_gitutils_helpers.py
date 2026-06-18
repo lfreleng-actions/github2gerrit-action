@@ -98,16 +98,18 @@ def test_run_cmd_with_retries_retries_on_transient_error_then_succeeds(
     # On subsequent runs (marker exists) print success and exit 0.
     marker = tmp_path / "attempted"
 
-    code = f"""
-import os, sys, pathlib
-p = pathlib.Path({str(marker)!r})
-if not p.exists():
-    p.write_text("1", encoding="utf-8")
-    print("could not resolve host: example.com", file=sys.stderr)
-    sys.exit(128)
-else:
-    print("ok")
-"""
+    code = "\n".join(
+        [
+            "import sys, pathlib",
+            f"p = pathlib.Path({repr(str(marker))})",
+            "if not p.exists():",
+            '    p.write_text("1", encoding="utf-8")',
+            '    print("could not resolve host: example.com", file=sys.stderr)',
+            "    sys.exit(128)",
+            "else:",
+            '    print("ok")',
+        ]
+    )
 
     res = run_cmd_with_retries(
         [sys.executable, "-c", code], cwd=tmp_path, env=_no_cov_env()
