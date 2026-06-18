@@ -31,6 +31,13 @@ from github2gerrit.gerrit_query import query_open_changes_by_project
 from github2gerrit.gitreview import GerritInfo
 from github2gerrit.models import GitHubContext
 from github2gerrit.similarity import extract_dependency_package_from_subject
+from github2gerrit.utils import reset_warning_once
+
+
+@pytest.fixture(autouse=True)
+def _reset_warning_once_state() -> None:
+    """Reset one-time warning global state before each test."""
+    reset_warning_once()
 
 
 # -------------------------------------------------------------------
@@ -202,10 +209,6 @@ class TestQueryOpenChangesByProject:
         to drive the anonymous fallback, the helper must short-circuit and
         never issue the request, returning an empty list.
         """
-        from github2gerrit.utils import reset_warning_once
-
-        reset_warning_once()
-
         fake_client = MagicMock()
         fake_client.is_authenticated = False
 
