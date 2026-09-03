@@ -464,6 +464,36 @@ jobs:
           GERRIT_CHANGE_URL: ${{ inputs.GERRIT_CHANGE_URL }}
           GERRIT_EVENT_TYPE: ${{ inputs.GERRIT_EVENT_TYPE }}
           GERRIT_BRANCH: ${{ inputs.GERRIT_BRANCH }}
+          # Project-level settings the tool reads from the environment
+          # and that carry no input of their own. Environment variables
+          # do not cross a workflow_call boundary, so a caller setting
+          # these with `env:` sees no error and gets the defaults — the
+          # documented advice silently failed for the integration this
+          # repository recommends.
+          #
+          # Repository variables are the right home for them anyway:
+          # they express project or organisation policy rather than
+          # per-run choices, and an organisation can set one once for
+          # every repository beneath it.
+          #
+          # Only G2G_-prefixed names are forwarded this way. An
+          # unprefixed variable such as REUSE_STRATEGY could collide
+          # with one a project already keeps for its own purposes, and
+          # silently changing behaviour on a name clash is worse than
+          # leaving the setting to the composite action.
+          #
+          # tests/test_action_step_validation.py holds the whole set to
+          # account: every recognised configuration key must be an
+          # input, be forwarded here, or be listed as deliberately out
+          # of reach.
+          # yamllint disable rule:line-length
+          G2G_TRUSTED_ASSOCIATIONS: ${{ vars.G2G_TRUSTED_ASSOCIATIONS }}
+          G2G_TOPIC_PREFIX: ${{ vars.G2G_TOPIC_PREFIX }}
+          G2G_SKIP_GERRIT_COMMENTS: ${{ vars.G2G_SKIP_GERRIT_COMMENTS }}
+          G2G_ENABLE_DERIVATION: ${{ vars.G2G_ENABLE_DERIVATION }}
+          G2G_ANON_SUPERSEDE_FALLBACK: ${{ vars.G2G_ANON_SUPERSEDE_FALLBACK }}
+          G2G_LOG_LEVEL: ${{ vars.G2G_LOG_LEVEL }}
+          # yamllint enable rule:line-length
         with:
           PR_NUMBER: ${{ inputs.PR_NUMBER }}
           SUBMIT_SINGLE_COMMITS: ${{ inputs.SUBMIT_SINGLE_COMMITS }}

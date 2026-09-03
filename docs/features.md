@@ -139,12 +139,21 @@ The parsing module performs no authorisation of its own. Calling
 from the GitHub API skips the check and recreates the original defect.
 
 Override the trusted set with `G2G_TRUSTED_ASSOCIATIONS`, a comma-separated
-list. Setting it to `OWNER` alone is the strictest useful value:
+list. Setting it to `OWNER` alone is the strictest useful value.
 
-```yaml
-env:
-  G2G_TRUSTED_ASSOCIATIONS: "OWNER,MEMBER"
+Set it as a **repository or organisation variable**, which both integration
+options honour and which an organisation can apply once across every
+repository beneath it:
+
+```plaintext
+Repository → Settings → Secrets and variables → Actions → Variables
+  G2G_TRUSTED_ASSOCIATIONS = OWNER,MEMBER
 ```
+
+A workflow calling the composite action directly may instead set it with
+`env:` on the job or step. That does **not** work through the reusable
+workflow: environment variables do not cross a `workflow_call` boundary, so
+the setting would be silently ignored and the default kept.
 
 An empty or blank value keeps the default rather than trusting nobody or
 everyone.

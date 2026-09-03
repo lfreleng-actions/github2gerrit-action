@@ -155,7 +155,20 @@ set by GitHub Actions) and undergo proper boolean parsing.
 
 ## Environment-Only Variables
 
-Some settings have no CLI flag and use environment variables:
+Some settings have no CLI flag and use environment variables.
+
+When running the tool as a GitHub Action, how you set one depends on the
+integration:
+
+- **Reusable workflow** — set the `G2G_`-prefixed settings below as repository
+  or organisation **variables**; the workflow forwards them. Environment
+  variables do not cross a `workflow_call` boundary, so `env:` in the caller
+  is silently ignored.
+- **Composite action** — set any of them with `env:` on the job or step.
+
+The workflow forwards only `G2G_`-prefixed names from repository variables.
+The unprefixed reconciliation settings could collide with a variable a project
+already keeps for something else, so they remain composite-action only.
 
 <!-- markdownlint-disable MD013 -->
 

@@ -116,6 +116,123 @@ class TestReusableWorkflowCheckoutOrder:
         assert "pull_request" not in str(seed.get("with", {}).get("ref", ""))
 
 
+# Recognised settings a consumer cannot supply through the reusable
+# workflow, each with the reason it is deliberately out of reach. See
+# TestEveryKnownSettingIsReachable for what this list holds to account.
+_SUPPLIED_BY_THE_ACTION = frozenset(
+    {
+        # The action provides these itself.
+        "GITHUB_TOKEN",
+        "GH_TOKEN",
+        "GERRIT_SSH_PRIVKEY_G2G",  # a secret, not an input
+        # Derived from another input rather than set directly.
+        "SYNC_ALL_OPEN_PRS",  # from PR_NUMBER
+        "G2G_VERBOSE",  # from VERBOSE
+        "G2G_DRYRUN_DISABLE_NETWORK",  # from G2G_NO_GERRIT
+    }
+)
+
+_LOCAL_CLI_ONLY = frozenset(
+    {
+        # Meaningful only when a person runs the tool themselves.
+        "G2G_AUTO_SAVE_CONFIG",
+        "G2G_RESPECT_USER_SSH",
+        "G2G_SHOW_PROGRESS",
+    }
+)
+
+_TESTING_ONLY = frozenset({"CI_TESTING", "USE_LOCAL_ACTION"})
+
+_COMPOSITE_ACTION_ONLY = frozenset(
+    {
+        # Reconciliation tuning, documented as env-only. The names are
+        # unprefixed, so forwarding them from repository variables
+        # risks colliding with a variable a project already keeps for
+        # something else, and silently changing behaviour on a name
+        # clash is worse than the present limitation.
+        "REUSE_STRATEGY",
+        "SIMILARITY_SUBJECT",
+        "SIMILARITY_UPDATE_FACTOR",
+        "SIMILARITY_FILES",
+        "ALLOW_ORPHAN_CHANGES",
+        "PERSIST_SINGLE_MAPPING_COMMENT",
+        "LOG_RECONCILE_JSON",
+        "VERIFY_DIGEST_STRICT",
+    }
+)
+
+_OUT_OF_REACH = (
+    _SUPPLIED_BY_THE_ACTION
+    | _LOCAL_CLI_ONLY
+    | _TESTING_ONLY
+    | _COMPOSITE_ACTION_ONLY
+)
+
+
+class TestEveryKnownSettingIsReachable:
+    """Recognised configuration must be settable through the action.
+
+    ``config.KNOWN_KEYS`` is the registry of settings the tool accepts.
+    A key in that set which no consumer can supply is not a missing
+    feature but a silent one: the project sets it, sees no warning, and
+    gets the default. That failure has now appeared three times — the
+    approver sources, the trusted associations, and the settings the
+    README told people to pass with ``env:``, which does not cross a
+    ``workflow_call`` boundary.
+
+    So the rule is stated once here rather than rediscovered. A key is
+    reachable when it is a workflow input, or forwarded from a
+    repository variable, or listed above as deliberately out of reach.
+    Adding a key forces that choice instead of leaving it to chance.
+    """
+
+    def _reachable(self, reusable_workflow) -> set[str]:
+        triggers = reusable_workflow.get("on", reusable_workflow.get(True))
+        declared = set(triggers["workflow_call"]["inputs"])
+
+        step = next(
+            s
+            for s in reusable_workflow["jobs"]["github2gerrit"]["steps"]
+            if s.get("name") == "Run github2gerrit composite action"
+        )
+        # Either block reaches the tool: `with` becomes an action
+        # input, `env` is inherited by the composite action's steps.
+        forwarded = {
+            name
+            for block in (step.get("with", {}), step.get("env", {}))
+            for name, value in block.items()
+            if "vars." in str(value)
+        }
+        return declared | forwarded
+
+    def test_no_setting_is_silently_unreachable(self, reusable_workflow):
+        from github2gerrit.config import KNOWN_KEYS
+
+        unreachable = sorted(
+            KNOWN_KEYS - self._reachable(reusable_workflow) - _OUT_OF_REACH
+        )
+        assert not unreachable, (
+            f"{unreachable} are recognised configuration but cannot be "
+            f"supplied through the reusable workflow, so a project "
+            f"setting them gets the defaults and no warning. Add an "
+            f"input, forward the repository variable, or record why "
+            f"the setting is deliberately out of reach."
+        )
+
+    def test_the_exemptions_are_real_settings(self):
+        # An exemption for a key that no longer exists hides a genuine
+        # gap behind a stale name.
+        from github2gerrit.config import KNOWN_KEYS
+
+        assert not sorted(_OUT_OF_REACH - KNOWN_KEYS)
+
+    def test_the_trust_set_is_reachable(self, reusable_workflow):
+        # Called out on its own because its failure is the unsafe one:
+        # a project tightening the trust set would believe it had, and
+        # keep the permissive default.
+        assert "G2G_TRUSTED_ASSOCIATIONS" in self._reachable(reusable_workflow)
+
+
 class TestReusableWorkflowForwardsItsInputs:
     """Every declared input must reach the composite action.
 
