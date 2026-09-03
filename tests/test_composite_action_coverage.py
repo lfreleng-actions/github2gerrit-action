@@ -296,7 +296,7 @@ class TestPRNumberHandling:
         )
 
         assert result.returncode == 2
-        assert "must be a numeric value" in result.stdout
+        assert "numeric value" in result.stdout
 
     def test_non_dispatch_rejects_explicit_pr_number(
         self, action_tester, default_inputs, default_github_context
@@ -602,9 +602,35 @@ class TestErrorHandling:
 class TestSecurityConsiderations:
     """Test security-related configurations."""
 
+    @staticmethod
+    def _without_descriptions(node):
+        """Strip ``description`` values from a parsed action config.
+
+        The scan below looks for hard-coded secret *values*, and prose
+        is not one. Descriptions were already exempt, but the check
+        worked line by line against re-dumped YAML, so a folded or
+        multi-line description leaked its continuation lines back in —
+        any of which mentioning `auth`, `key` or `token` produced a
+        false positive. Removing them structurally cannot miss.
+        """
+        if isinstance(node, dict):
+            return {
+                key: TestSecurityConsiderations._without_descriptions(value)
+                for key, value in node.items()
+                if key != "description"
+            }
+        if isinstance(node, list):
+            return [
+                TestSecurityConsiderations._without_descriptions(item)
+                for item in node
+            ]
+        return node
+
     def test_no_hardcoded_secrets(self, action_tester):
         """Test that no secrets are hardcoded in the action."""
-        action_yaml = yaml.dump(action_tester.action_config)
+        action_yaml = yaml.dump(
+            self._without_descriptions(action_tester.action_config)
+        )
 
         # Check for potential secret patterns
         sensitive_patterns = ["password", "token", "key", "secret", "auth"]

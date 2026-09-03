@@ -13,6 +13,7 @@ from __future__ import annotations
 import dataclasses
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from typing import cast
 from unittest.mock import patch
@@ -25,10 +26,12 @@ from github2gerrit.cli import _build_bulk_pr_tasks
 from github2gerrit.cli import _head_repo_for_pr
 from github2gerrit.cli import _read_head_repo
 from github2gerrit.cli import _ref_for_pr
+from github2gerrit.cli import _skip_unprivileged_fork_run
 from github2gerrit.core import Orchestrator
 from github2gerrit.duplicate_detection import DuplicateDetector
 from github2gerrit.gitreview import GitReviewInfo
 from github2gerrit.models import GitHubContext
+from github2gerrit.models import Inputs
 
 
 sys.path.append(str(Path(__file__).parent))
@@ -47,9 +50,10 @@ def _gh_ctx(
     base_ref: str = "master",
     head_ref: str = "feature/evil",
     pr_number: int | None = 29,
+    event_name: str = "pull_request_target",
 ) -> GitHubContext:
     return GitHubContext(
-        event_name="pull_request_target",
+        event_name=event_name,
         event_action="opened",
         event_path=None,
         repository=repository,
@@ -61,6 +65,19 @@ def _gh_ctx(
         head_ref=head_ref,
         pr_number=pr_number,
         head_repo=head_repo,
+    )
+
+
+def _inputs(*, privkey: str = "", dry_run: bool = False) -> Inputs:
+    """A stand-in carrying only the fields the skip decision reads.
+
+    ``Inputs`` has some thirty required fields; supplying all of them
+    here would suggest the rest matter to this decision, which they do
+    not. The cast records the partiality deliberately.
+    """
+    return cast(
+        Inputs,
+        SimpleNamespace(gerrit_ssh_privkey_g2g=privkey, dry_run=dry_run),
     )
 
 
@@ -83,6 +100,83 @@ class TestIsForkPr:
     def test_unknown_base_repo_is_not_a_fork(self) -> None:
         ctx = _gh_ctx(repository="", head_repo=FORK_REPO)
         assert ctx.is_fork_pr is False
+
+
+class TestSkipUnprivilegedForkRun:
+    """A run GitHub denied secrets to must stop, and say why.
+
+    The skip has to be narrow. Swallowing a genuinely unset secret is
+    the worse failure of the two, because a silent success reads as a
+    working configuration.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _in_actions(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("GITHUB_ACTIONS", "true")
+        monkeypatch.delenv("G2G_NO_GERRIT", raising=False)
+
+    @pytest.mark.parametrize(
+        "event_name",
+        ["pull_request", "pull_request_review", "pull_request_review_comment"],
+    )
+    def test_fork_run_without_key_is_skipped(self, event_name: str) -> None:
+        ctx = _gh_ctx(head_repo=FORK_REPO, event_name=event_name)
+        assert _skip_unprivileged_fork_run(_inputs(), ctx) is True
+
+    @pytest.mark.parametrize(
+        "event_name",
+        ["pull_request_target", "issue_comment", "schedule", "workflow_run"],
+    )
+    def test_privileged_trigger_still_reports_a_missing_key(
+        self, event_name: str
+    ) -> None:
+        # These run from the default branch and do receive secrets, so
+        # an absent key there is a real misconfiguration.
+        ctx = _gh_ctx(head_repo=FORK_REPO, event_name=event_name)
+        assert _skip_unprivileged_fork_run(_inputs(), ctx) is False
+
+    def test_same_repo_run_still_reports_a_missing_key(self) -> None:
+        ctx = _gh_ctx(head_repo=BASE_REPO, event_name="pull_request")
+        assert _skip_unprivileged_fork_run(_inputs(), ctx) is False
+
+    def test_unresolved_provenance_still_reports_a_missing_key(self) -> None:
+        # Deliberately keyed on is_fork_pr, not head_is_trusted: an
+        # unknown head is not known to be a fork, and treating it as
+        # one would hide a same-repository misconfiguration.
+        ctx = _gh_ctx(head_repo="", event_name="pull_request")
+        assert ctx.head_is_trusted is False
+        assert _skip_unprivileged_fork_run(_inputs(), ctx) is False
+
+    def test_present_key_is_never_skipped(self) -> None:
+        ctx = _gh_ctx(head_repo=FORK_REPO, event_name="pull_request_review")
+        assert _skip_unprivileged_fork_run(_inputs(privkey="KEY"), ctx) is False
+
+    def test_direct_cli_invocation_is_unaffected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Outside Actions there is no trigger to blame; the operator is
+        # running the tool themselves and wants the real error.
+        monkeypatch.setenv("GITHUB_ACTIONS", "false")
+        monkeypatch.setenv("GITHUB_EVENT_NAME", "")
+        ctx = _gh_ctx(head_repo=FORK_REPO, event_name="pull_request")
+        assert _skip_unprivileged_fork_run(_inputs(), ctx) is False
+
+    def test_no_gerrit_mode_still_runs(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # G2G_NO_GERRIT is keyless by design: it exercises the whole
+        # pipeline with the Gerrit network operations stubbed out. The
+        # absent key is the point, not a symptom of a denied secret,
+        # so skipping would defeat the mode entirely.
+        monkeypatch.setenv("G2G_NO_GERRIT", "true")
+        ctx = _gh_ctx(head_repo=FORK_REPO, event_name="pull_request")
+        assert _skip_unprivileged_fork_run(_inputs(), ctx) is False
+
+    def test_dry_run_still_runs(self) -> None:
+        # A dry run returns from Orchestrator.execute before SSH setup,
+        # so it is keyless for the same reason.
+        ctx = _gh_ctx(head_repo=FORK_REPO, event_name="pull_request")
+        assert _skip_unprivileged_fork_run(_inputs(dry_run=True), ctx) is False
 
 
 class TestHeadIsTrusted:

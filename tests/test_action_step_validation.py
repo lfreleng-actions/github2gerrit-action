@@ -10,6 +10,7 @@ integration between action steps.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import tempfile
 import textwrap
@@ -113,6 +114,504 @@ class TestReusableWorkflowCheckoutOrder:
 
         assert "github.event_name == 'push'" in str(seed.get("if", ""))
         assert "pull_request" not in str(seed.get("with", {}).get("ref", ""))
+
+
+# Recognised settings a consumer cannot supply through the reusable
+# workflow, each with the reason it is deliberately out of reach. See
+# TestEveryKnownSettingIsReachable for what this list holds to account.
+_SUPPLIED_BY_THE_ACTION = frozenset(
+    {
+        # The action provides these itself.
+        "GITHUB_TOKEN",
+        "GH_TOKEN",
+        "GERRIT_SSH_PRIVKEY_G2G",  # a secret, not an input
+        # Derived from another input rather than set directly.
+        "SYNC_ALL_OPEN_PRS",  # from PR_NUMBER
+        "G2G_VERBOSE",  # from VERBOSE
+        "G2G_DRYRUN_DISABLE_NETWORK",  # from G2G_NO_GERRIT
+    }
+)
+
+_LOCAL_CLI_ONLY = frozenset(
+    {
+        # Meaningful only when a person runs the tool themselves.
+        "G2G_AUTO_SAVE_CONFIG",
+        "G2G_RESPECT_USER_SSH",
+        "G2G_SHOW_PROGRESS",
+    }
+)
+
+_TESTING_ONLY = frozenset({"CI_TESTING", "USE_LOCAL_ACTION"})
+
+_COMPOSITE_ACTION_ONLY = frozenset(
+    {
+        # Reconciliation tuning, documented as env-only. The names are
+        # unprefixed, so forwarding them from repository variables
+        # risks colliding with a variable a project already keeps for
+        # something else, and silently changing behaviour on a name
+        # clash is worse than the present limitation.
+        "REUSE_STRATEGY",
+        "SIMILARITY_SUBJECT",
+        "SIMILARITY_UPDATE_FACTOR",
+        "SIMILARITY_FILES",
+        "ALLOW_ORPHAN_CHANGES",
+        "PERSIST_SINGLE_MAPPING_COMMENT",
+        "LOG_RECONCILE_JSON",
+        "VERIFY_DIGEST_STRICT",
+    }
+)
+
+_OUT_OF_REACH = (
+    _SUPPLIED_BY_THE_ACTION
+    | _LOCAL_CLI_ONLY
+    | _TESTING_ONLY
+    | _COMPOSITE_ACTION_ONLY
+)
+
+
+class TestEveryKnownSettingIsReachable:
+    """Recognised configuration must be settable through the action.
+
+    ``config.KNOWN_KEYS`` is the registry of settings the tool accepts.
+    A key in that set which no consumer can supply is not a missing
+    feature but a silent one: the project sets it, sees no warning, and
+    gets the default. That failure has now appeared three times — the
+    approver sources, the trusted associations, and the settings the
+    README told people to pass with ``env:``, which does not cross a
+    ``workflow_call`` boundary.
+
+    So the rule is stated once here rather than rediscovered. A key is
+    reachable when it is a workflow input, or forwarded from a
+    repository variable, or listed above as deliberately out of reach.
+    Adding a key forces that choice instead of leaving it to chance.
+    """
+
+    def _reachable(self, reusable_workflow) -> set[str]:
+        triggers = reusable_workflow.get("on", reusable_workflow.get(True))
+        declared = set(triggers["workflow_call"]["inputs"])
+
+        step = next(
+            s
+            for s in reusable_workflow["jobs"]["github2gerrit"]["steps"]
+            if s.get("name") == "Run github2gerrit composite action"
+        )
+        # Either block reaches the tool: `with` becomes an action
+        # input, `env` is inherited by the composite action's steps.
+        forwarded = {
+            name
+            for block in (step.get("with", {}), step.get("env", {}))
+            for name, value in block.items()
+            if "vars." in str(value)
+        }
+        return declared | forwarded
+
+    def test_no_setting_is_silently_unreachable(self, reusable_workflow):
+        from github2gerrit.config import KNOWN_KEYS
+
+        unreachable = sorted(
+            KNOWN_KEYS - self._reachable(reusable_workflow) - _OUT_OF_REACH
+        )
+        assert not unreachable, (
+            f"{unreachable} are recognised configuration but cannot be "
+            f"supplied through the reusable workflow, so a project "
+            f"setting them gets the defaults and no warning. Add an "
+            f"input, forward the repository variable, or record why "
+            f"the setting is deliberately out of reach."
+        )
+
+    def test_the_exemptions_are_real_settings(self):
+        # An exemption for a key that no longer exists hides a genuine
+        # gap behind a stale name.
+        from github2gerrit.config import KNOWN_KEYS
+
+        assert not sorted(_OUT_OF_REACH - KNOWN_KEYS)
+
+    def test_the_trust_set_is_reachable(self, reusable_workflow):
+        # Called out on its own because its failure is the unsafe one:
+        # a project tightening the trust set would believe it had, and
+        # keep the permissive default.
+        assert "G2G_TRUSTED_ASSOCIATIONS" in self._reachable(reusable_workflow)
+
+
+class TestReusableWorkflowForwardsItsInputs:
+    """Every declared input must reach the composite action.
+
+    An input the workflow accepts but never passes on is worse than an
+    absent one: the caller sets it, sees no error, and gets the
+    default. That is how the approver settings were unusable through
+    this interface when first written, and how
+    ``G2G_TRUSTED_ASSOCIATIONS`` still is (#420).
+
+    Stated as an invariant over whatever the workflow declares, so a
+    future input cannot repeat it.
+    """
+
+    ACTION_STEP = "Run github2gerrit composite action"
+
+    _INPUT_REFERENCE = re.compile(r"inputs\.([A-Za-z_][A-Za-z0-9_]*)")
+
+    @staticmethod
+    def _workflow_call(reusable_workflow):
+        # YAML 1.1 resolves a bare `on:` key to the boolean True, so
+        # the mapping is not reachable under the string "on".
+        triggers = reusable_workflow.get("on", reusable_workflow.get(True))
+        assert triggers is not None, "workflow declares no triggers"
+        return triggers["workflow_call"]
+
+    def _action_step(self, reusable_workflow):
+        return next(
+            step
+            for step in reusable_workflow["jobs"]["github2gerrit"]["steps"]
+            if step.get("name") == self.ACTION_STEP
+        )
+
+    def _forwarded_names(self, reusable_workflow) -> set[str]:
+        """Return the input names the action step actually references.
+
+        Whole names, extracted by pattern, rather than a substring
+        test: `"inputs.GERRIT_SERVER" in text` is satisfied by a
+        forwarded `inputs.GERRIT_SERVER_PORT`, so dropping the shorter
+        mapping would go unnoticed. This interface has two such pairs.
+        """
+        step = self._action_step(reusable_workflow)
+        text = "\n".join(
+            [*step.get("with", {}).values(), *step.get("env", {}).values()]
+        )
+        return set(self._INPUT_REFERENCE.findall(text))
+
+    def test_every_input_is_forwarded(self, reusable_workflow):
+        declared = set(self._workflow_call(reusable_workflow)["inputs"])
+        forwarded = self._forwarded_names(reusable_workflow)
+
+        missing = sorted(declared - forwarded)
+        assert not missing, (
+            f"the reusable workflow declares {missing} but never passes "
+            f"them to the action, so a caller setting them silently gets "
+            f"the defaults"
+        )
+
+    def test_secrets_are_forwarded(self, reusable_workflow):
+        declared = set(self._workflow_call(reusable_workflow)["secrets"])
+        forwarded = "\n".join(
+            self._action_step(reusable_workflow).get("with", {}).values()
+        )
+        missing = sorted(
+            name for name in declared if f"secrets.{name}" not in forwarded
+        )
+        assert not missing, f"secrets declared but not forwarded: {missing}"
+
+
+class TestExtractStepEventHandling:
+    """The shipped extract script, executed rather than replicated.
+
+    ``tests/test_action_pr_number_handling.py`` exercises a copy of
+    this logic, which cannot notice the real script changing.  These
+    run the script straight out of ``action.yaml``.
+    """
+
+    STEP_NAME = "Extract PR number, validate context"
+    NORMALIZE_STEP = "Normalize PR_NUMBER"
+
+    def _script(self, action_config, step_name=None):
+        wanted = step_name or self.STEP_NAME
+        step = next(
+            s for s in action_config["runs"]["steps"] if s.get("name") == wanted
+        )
+        return step["run"]
+
+    def _run(self, action_config, tmp_path, event_name, step_name=None, **env):
+        output = tmp_path / "github_output"
+        output.touch()
+        environment = {
+            **os.environ,
+            "GITHUB_EVENT_NAME": event_name,
+            "GITHUB_OUTPUT": str(output),
+            "EVENT_PR_NUMBER": "",
+            "DISPATCH_PR_NUMBER": "",
+            "DISPATCH_SYNC_ALL": "",
+            "INPUT_PR_NUMBER": "",
+            **env,
+        }
+        result = subprocess.run(
+            ["bash", "-c", self._script(action_config, step_name)],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=environment,
+        )
+        return result, output.read_text()
+
+    def test_push_needs_no_pull_request(self, action_config, tmp_path):
+        result, output = self._run(action_config, tmp_path, "push")
+        assert result.returncode == 0, result.stderr
+        assert "pr_number=" in output
+        assert "sync_all" not in output
+
+    def test_comment_uses_the_issue_number(self, action_config, tmp_path):
+        result, output = self._run(
+            action_config,
+            tmp_path,
+            "issue_comment",
+            EVENT_PR_NUMBER="29",
+        )
+        assert result.returncode == 0, result.stderr
+        assert "pr_number=29" in output
+
+    @pytest.mark.parametrize("value", ["029", "0029", "01"])
+    def test_non_canonical_dispatch_numbers_are_refused(
+        self, action_config, tmp_path, value
+    ):
+        # The concurrency key uses this string raw, so '029' would key
+        # on '029' while naming pull request 29 and race the events
+        # for it. GitHub expressions cannot normalise it, so refuse it
+        # here: a run that cannot start cannot race.
+        result, _output = self._run(
+            action_config,
+            tmp_path,
+            "workflow_dispatch",
+            step_name=self.NORMALIZE_STEP,
+            INPUT_PR_NUMBER=value,
+        )
+        assert result.returncode == 2
+        assert "no leading zeros" in result.stdout
+
+    def test_canonical_dispatch_number_is_accepted(
+        self, action_config, tmp_path
+    ):
+        result, output = self._run(
+            action_config,
+            tmp_path,
+            "workflow_dispatch",
+            step_name=self.NORMALIZE_STEP,
+            INPUT_PR_NUMBER="29",
+        )
+        assert result.returncode == 0, result.stderr
+        assert "pr_number=29" in output
+
+    def test_missing_pull_request_context_still_errors(
+        self, action_config, tmp_path
+    ):
+        # Only the events that genuinely have no pull request may skip
+        # this; everything else must keep failing loudly.
+        result, _output = self._run(
+            action_config, tmp_path, "pull_request_target"
+        )
+        assert result.returncode == 2
+        assert "requires a valid pull request context" in result.stdout
+
+
+def _open_command_phrases() -> list[str]:
+    """Return every phrase anybody may use to direct the tool.
+
+    Derived from the registry so that a workflow condition or a README
+    example naming these phrases cannot fall behind a new alias.
+
+    The mention is checked separately by callers, because the parser
+    accepts any whitespace between it and the phrase; requiring one
+    literal space would silently skip a supported directive.
+    """
+    from github2gerrit.pr_commands import COMMAND_REGISTRY
+
+    phrases = [
+        phrase
+        for command in COMMAND_REGISTRY
+        if not command.requires_trust
+        for phrase in command.all_phrases()
+    ]
+    assert phrases, "no open command to admit"
+    return phrases
+
+
+def _readme_comment_guards() -> list[str]:
+    """Return the comment-guard lines the README shows to readers."""
+    readme = (Path(__file__).parent.parent / "README.md").read_text()
+    guards = [
+        line
+        for line in readme.splitlines()
+        if "contains(github.event.comment.body" in line
+    ]
+    assert guards, "README shows no comment guard to check"
+    return guards
+
+
+class TestReusableWorkflowConcurrency:
+    """The concurrency group must tell pull requests apart.
+
+    GitHub keeps at most one running and one pending run per group and
+    discards the rest.  A group that cannot distinguish two pull
+    requests therefore does not merely serialise them, it silently
+    drops runs — which for a trigger used to re-evaluate the fork
+    approval gate means an approval that never takes effect.
+
+    The invariant is expressed against the job's own ``if`` condition
+    rather than a hard-coded list of events, so adding a trigger that
+    admits a new payload shape fails here until the group can key on
+    it.
+    """
+
+    _PR_NUMBER_ACCESSOR = re.compile(r"github\.event\.\w+\.number")
+
+    def _job(self, reusable_workflow):
+        return reusable_workflow["jobs"]["github2gerrit"]
+
+    def test_group_keys_on_every_admitted_payload_shape(
+        self, reusable_workflow
+    ):
+        job = self._job(reusable_workflow)
+        admitted = set(self._PR_NUMBER_ACCESSOR.findall(job["if"]))
+        assert admitted, "job condition admits no pull request payload"
+
+        group = job["concurrency"]["group"]
+        missing = sorted(a for a in admitted if a not in group)
+        assert not missing, (
+            f"the job admits runs via {missing} but the concurrency "
+            f"group cannot key on them, so those runs would share one "
+            f"group: {group}"
+        )
+
+    def test_dispatched_single_pr_shares_the_pull_request_lock(
+        self, reusable_workflow
+    ):
+        # A single-PR workflow_dispatch carries neither payload
+        # accessor and names its target in an input instead. Without
+        # this it would sit in the event-name group and could transfer
+        # concurrently with a comment-triggered run for the same PR.
+        group = self._job(reusable_workflow)["concurrency"]["group"]
+        assert "inputs.PR_NUMBER" in group
+        # Used raw, because GitHub expressions have no arithmetic to
+        # canonicalise it; the action rejects a non-canonical value
+        # such as '029' instead, so a run that would key on the wrong
+        # group never starts. '0' is a bulk sweep and '' is unset, so
+        # both fall through to the event name rather than collapsing
+        # every run into one group.
+        assert "inputs.PR_NUMBER != '0'" in group
+        assert "inputs.PR_NUMBER != ''" in group
+
+    def test_ordinary_comments_do_not_enter_the_group(self, reusable_workflow):
+        # GitHub keeps one running and one pending run per group and
+        # cancels the older pending one, so an unrelated comment
+        # admitted here can evict a re-check that somebody asked for.
+        condition = self._job(reusable_workflow)["if"]
+        assert "github.event.comment.body" in condition
+
+    @pytest.mark.parametrize(
+        "event_name", ["pull_request_review", "pull_request_review_comment"]
+    )
+    def test_review_events_do_not_take_the_lock(
+        self, reusable_workflow, event_name
+    ):
+        # Neither can transfer anything, but both payloads carry
+        # pull_request.number, so admitting them would take a slot in
+        # the per-PR group and could evict a pending re-check.
+        condition = self._job(reusable_workflow)["if"]
+        assert f"github.event_name != '{event_name}'" in condition
+
+    def test_fork_pull_request_events_do_not_take_the_lock(
+        self, reusable_workflow
+    ):
+        # GitHub denies these secrets, so the run stops at
+        # _skip_unprivileged_fork_run — but only after taking a slot in
+        # the per-PR group, where it could evict a real re-check.
+        condition = self._job(reusable_workflow)["if"]
+        assert "github.event_name != 'pull_request'" in condition
+        assert (
+            "github.event.pull_request.head.repo.full_name == "
+            "github.repository" in condition
+        )
+
+    def test_keyless_modes_survive_the_fork_exclusion(self, reusable_workflow):
+        # G2G_NO_GERRIT and DRY_RUN never reach Gerrit, and this
+        # repository's own testing workflow calls this one with
+        # G2G_NO_GERRIT on every trigger. Excluding fork pull_request
+        # unconditionally would drop that coverage entirely.
+        condition = self._job(reusable_workflow)["if"]
+        assert "inputs.G2G_NO_GERRIT" in condition
+        assert "inputs.DRY_RUN" in condition
+        # The action step falls back to the repository variable, so
+        # this condition has to as well or a project setting only the
+        # variable is skipped before the action ever sees it.
+        assert "vars.G2G_NO_GERRIT == 'true'" in condition
+
+    def test_fork_pull_request_target_is_still_admitted(
+        self, reusable_workflow
+    ):
+        # The privileged trigger applies the gate, so excluding fork
+        # heads there would disable the feature entirely. The head
+        # test must be scoped to pull_request alone.
+        condition = self._job(reusable_workflow)["if"]
+        assert "github.event_name != 'pull_request_target'" not in condition
+
+    def test_readme_examples_reject_closed_pull_requests(self):
+        # The bundled workflow guards this; a reader copying the
+        # composite-action example gets no such condition unless the
+        # example carries it.
+        for guard in _readme_comment_guards():
+            assert "github.event.issue.state == 'open'" in guard, (
+                "a README comment guard admits closed pull requests, so "
+                "anyone could start a run on a merged one"
+            )
+
+    def test_comments_on_closed_pull_requests_are_not_admitted(
+        self, reusable_workflow
+    ):
+        # A closed pull request has no gate left to lift, so a run
+        # there could only fail. Any commenter could otherwise put a
+        # failing check on it at will.
+        condition = self._job(reusable_workflow)["if"]
+        assert "github.event.issue.state == 'open'" in condition
+
+    def test_every_open_command_phrase_is_admitted(self, reusable_workflow):
+        # The condition names the command phrases, which duplicates the
+        # registry in YAML. Without this, adding an alias would leave a
+        # documented directive that silently never starts a run.
+        condition = self._job(reusable_workflow)["if"]
+        missing = [
+            f"'{phrase}'"
+            for phrase in _open_command_phrases()
+            if f"'{phrase}'" not in condition
+        ]
+        assert not missing, (
+            f"the job condition does not admit {missing}, so those "
+            f"directives would never start a run"
+        )
+
+    def test_the_mention_is_tested_separately(self, reusable_workflow):
+        # The parser accepts any whitespace between the mention and
+        # the phrase, and GitHub's mention autocomplete inserts a
+        # trailing space, so '@github2gerrit  check' is both supported
+        # and likely. Joining them into one literal would skip it.
+        condition = self._job(reusable_workflow)["if"]
+        assert "'@github2gerrit'" in condition
+        for phrase in _open_command_phrases():
+            assert f"'@github2gerrit {phrase}'" not in condition
+
+    def test_readme_examples_admit_the_same_phrases(self):
+        # Readers copy these guards verbatim, so an example that omits
+        # an alias hands them a directive that silently does nothing.
+        guards = _readme_comment_guards()
+        joined = "\n".join(guards)
+        assert "'@github2gerrit'" in joined
+        missing = [
+            f"'{phrase}'"
+            for phrase in _open_command_phrases()
+            if f"'{phrase}'" not in joined
+        ]
+        assert not missing, (
+            f"the README comment guards omit {missing}, so a reader "
+            f"copying them would find those directives ignored"
+        )
+
+    def test_group_falls_back_to_the_event_name(self, reusable_workflow):
+        # Non-pull-request runs (push and dispatch) get one
+        # group each rather than colliding on an empty operand.
+        group = self._job(reusable_workflow)["concurrency"]["group"]
+        assert "github.event_name" in group
+        assert group.split("||")[-1].strip().startswith("github.event_name")
+
+    def test_in_flight_runs_are_queued_not_cancelled(self, reusable_workflow):
+        # An interrupted run may already have pushed to Gerrit.
+        concurrency = self._job(reusable_workflow)["concurrency"]
+        assert concurrency["cancel-in-progress"] is False
 
 
 class TestActionStepValidation:

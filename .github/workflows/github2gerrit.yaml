@@ -196,6 +196,24 @@ on:
         default: true
         type: boolean
 
+      # Fork approval gate: additional approver sources. Both default
+      # off; each widens who counts as a maintainer.
+      G2G_APPROVER_LOGINS:
+        description: "Comma-separated logins whose approvals clear the gate"
+        required: false
+        default: ""
+        type: string
+      G2G_APPROVERS_FROM_INFO_YAML:
+        description: "Read approvers from the base repo's INFO.yaml"
+        required: false
+        default: false
+        type: boolean
+      G2G_INFO_YAML_MATCH_LFID:
+        description: "Also treat an INFO.yaml 'id' as a GitHub login"
+        required: false
+        default: false
+        type: boolean
+
       # Metadata
       ORGANIZATION:
         description: >-
@@ -265,8 +283,63 @@ jobs:
     # events (close PRs for merged Gerrit changes), and dispatch
     # events from the caller (manual PR processing or Gerrit-event
     # dispatches)
+    #
+    # Three event families reach this job carrying pull_request.number
+    # while being unable to transfer anything: reviews, review
+    # comments, and pull_request on a fork head, which GitHub denies
+    # secrets. All three are excluded rather than left to stop inside
+    # the tool, because reaching the tool means first taking a slot in
+    # the per-PR concurrency group below, where GitHub keeps one
+    # running and one pending run and cancels the older pending one.
+    # A run that can do no useful work must not be able to evict a
+    # re-check that can.
+    #
+    # pull_request on a fork head is excluded for the same reason,
+    # since GitHub denies it secrets — except in the keyless modes.
+    # G2G_NO_GERRIT and DRY_RUN both run the pipeline without ever
+    # reaching Gerrit, _skip_unprivileged_fork_run exempts them, and
+    # this repository's own testing workflow calls this one with
+    # G2G_NO_GERRIT on every trigger. Excluding them unconditionally
+    # would skip that coverage on any fork pull request. They cannot
+    # transfer, so the slot they take is the accepted cost of testing
+    # the path consumers actually use.
+    #
+    # G2G_NO_GERRIT is read from the repository variable too, matching
+    # the fallback the action step below applies, so a project setting
+    # only the variable is not skipped here. Compared against 'true'
+    # rather than tested for truthiness, because an unset variable is
+    # the empty string while one set to 'false' is a non-empty string
+    # and would otherwise count as enabled.
+    #
+    # pull_request_target on a fork head is deliberately kept: it runs
+    # from the default branch, holds the credentials, and is the
+    # trigger that applies the approval gate.
+    #
+    # issue_comment fires for issues, for open pull requests and for
+    # closed ones. The issue payload must carry a pull_request member
+    # and still be open: admitting a bare issue.number would treat a
+    # comment on issue N as pull request N, and a closed pull request
+    # has no gate left to lift, so a run there could only fail.
+    #
+    # The directive is matched here for the same concurrency reason:
+    # ordinary conversation and bare mentions stay out of the group
+    # entirely. The mention and the command phrase are tested
+    # separately rather than as one string, because the parser accepts
+    # any whitespace between them and GitHub's own mention
+    # autocomplete inserts a trailing space — so '@github2gerrit  check'
+    # is both a supported directive and a likely one. Requiring a
+    # single literal space would skip it silently, which is worse than
+    # admitting an extra run: a maintainer would comment and see
+    # nothing happen, with no feedback anywhere.
+    #
+    # Deliberately looser than the CLI's grammar in the other
+    # direction: a comment mentioning the tool and containing the word
+    # 'check' anywhere is admitted here and judged there. Erring that
+    # way costs a slot; erring the other way loses a directive. Drift
+    # is guarded by tests/test_action_step_validation.py, which
+    # requires every phrase of every open command to appear below.
     # yamllint disable-line rule:line-length
-    if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event.pull_request.number || github.event.issue.number }}
+    if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event.pull_request.number && github.event_name != 'pull_request_review' && github.event_name != 'pull_request_review_comment' && (github.event_name != 'pull_request' || inputs.G2G_NO_GERRIT || inputs.DRY_RUN || vars.G2G_NO_GERRIT == 'true' || github.event.pull_request.head.repo.full_name == github.repository)) || (github.event.issue.number && github.event.issue.pull_request && github.event.issue.state == 'open' && contains(github.event.comment.body, '@github2gerrit') && (contains(github.event.comment.body, 'check') || contains(github.event.comment.body, 'recheck') || contains(github.event.comment.body, 'retry'))) }}
     runs-on: ubuntu-latest
     timeout-minutes: 12
     permissions:
@@ -275,10 +348,29 @@ jobs:
       issues: write  # Post status/back-reference comments on issues
     # Serialize runs per pull request; non-PR runs (push events and
     # dispatches) queue per event type. Queue rather than cancel so an
-    # in-flight push to Gerrit is never interrupted
+    # in-flight push to Gerrit is never interrupted.
+    #
+    # Three operands, because a pull request reaches this job through
+    # three payload shapes. Comment payloads carry github.event.issue
+    # rather than github.event.pull_request, and a single-PR
+    # workflow_dispatch carries neither: it names its target in
+    # inputs.PR_NUMBER. Any pull request able to arrive by more than
+    # one route must share one group, or two runs could transfer the
+    # same commit concurrently and leave two Gerrit changes.
+    #
+    # The dispatch operand is the raw string, so a non-canonical value
+    # such as '029' would key on '029' while naming pull request 29.
+    # GitHub expressions have no arithmetic to normalise it, so the
+    # action rejects such values outright instead: see the PR_NUMBER
+    # normalisation step, whose pattern admits only canonical numbers.
+    # A run that cannot start cannot race.
+    #
+    # '0' is a bulk sweep and '' is unset, neither of which names a
+    # pull request, so both fall through to the event name rather than
+    # collapsing every run into one group.
     concurrency:
       # yamllint disable-line rule:line-length
-      group: g2g-${{ github.repository }}-${{ github.event.pull_request.number || github.event_name }}
+      group: g2g-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number || ((inputs.PR_NUMBER != '' && inputs.PR_NUMBER != '0') && inputs.PR_NUMBER) || github.event_name }}
       cancel-in-progress: false
     outputs:
       # yamllint disable rule:line-length
@@ -372,6 +464,36 @@ jobs:
           GERRIT_CHANGE_URL: ${{ inputs.GERRIT_CHANGE_URL }}
           GERRIT_EVENT_TYPE: ${{ inputs.GERRIT_EVENT_TYPE }}
           GERRIT_BRANCH: ${{ inputs.GERRIT_BRANCH }}
+          # Project-level settings the tool reads from the environment
+          # and that carry no input of their own. Environment variables
+          # do not cross a workflow_call boundary, so a caller setting
+          # these with `env:` sees no error and gets the defaults — the
+          # documented advice silently failed for the integration this
+          # repository recommends.
+          #
+          # Repository variables are the right home for them anyway:
+          # they express project or organisation policy rather than
+          # per-run choices, and an organisation can set one once for
+          # every repository beneath it.
+          #
+          # Only G2G_-prefixed names are forwarded this way. An
+          # unprefixed variable such as REUSE_STRATEGY could collide
+          # with one a project already keeps for its own purposes, and
+          # silently changing behaviour on a name clash is worse than
+          # leaving the setting to the composite action.
+          #
+          # tests/test_action_step_validation.py holds the whole set to
+          # account: every recognised configuration key must be an
+          # input, be forwarded here, or be listed as deliberately out
+          # of reach.
+          # yamllint disable rule:line-length
+          G2G_TRUSTED_ASSOCIATIONS: ${{ vars.G2G_TRUSTED_ASSOCIATIONS }}
+          G2G_TOPIC_PREFIX: ${{ vars.G2G_TOPIC_PREFIX }}
+          G2G_SKIP_GERRIT_COMMENTS: ${{ vars.G2G_SKIP_GERRIT_COMMENTS }}
+          G2G_ENABLE_DERIVATION: ${{ vars.G2G_ENABLE_DERIVATION }}
+          G2G_ANON_SUPERSEDE_FALLBACK: ${{ vars.G2G_ANON_SUPERSEDE_FALLBACK }}
+          G2G_LOG_LEVEL: ${{ vars.G2G_LOG_LEVEL }}
+          # yamllint enable rule:line-length
         with:
           PR_NUMBER: ${{ inputs.PR_NUMBER }}
           SUBMIT_SINGLE_COMMITS: ${{ inputs.SUBMIT_SINGLE_COMMITS }}
@@ -402,6 +524,10 @@ jobs:
           GERRIT_HTTP_USER: ${{ inputs.GERRIT_HTTP_USER }}
           GERRIT_HTTP_PASSWORD: ${{ inputs.GERRIT_HTTP_PASSWORD }}
           G2G_USE_SSH_AGENT: ${{ inputs.G2G_USE_SSH_AGENT }}
+          G2G_APPROVER_LOGINS: ${{ inputs.G2G_APPROVER_LOGINS }}
+          # yamllint disable-line rule:line-length
+          G2G_APPROVERS_FROM_INFO_YAML: ${{ inputs.G2G_APPROVERS_FROM_INFO_YAML }}
+          G2G_INFO_YAML_MATCH_LFID: ${{ inputs.G2G_INFO_YAML_MATCH_LFID }}
           ORGANIZATION: ${{ inputs.ORGANIZATION || github.repository_owner }}
           REVIEWERS_EMAIL: ${{ inputs.REVIEWERS_EMAIL }}
           ISSUE_ID: ${{ inputs.ISSUE_ID }}
