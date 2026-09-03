@@ -40,6 +40,15 @@ Design principles
    :func:`parse_commands`, :func:`find_command` or :func:`has_command`
    directly.
 
+   :func:`find_open_command` is the single, deliberate exception, and
+   it enforces its own limits: it refuses any command that has not set
+   ``requires_trust=False``.  A command may only do so when it *grants
+   nothing* — when it makes the tool look again rather than act, so
+   that every authorisation decision is re-taken from the API
+   afterwards.  ``requires_trust`` defaults to ``True``, so a new
+   command stays confined to trusted authors unless its author
+   deliberately opts out.
+
 Supported commands
 ──────────────────
 ``create missing change`` (aliases ``create missing``, ``create-missing``)
@@ -47,6 +56,18 @@ Supported commands
     operation cannot locate an existing one.  This addresses the
     scenario where the original ``opened`` event failed and subsequent
     ``synchronize`` events cannot find a change to update.
+
+    Requires a trusted author: it makes the tool act.
+
+``check`` (aliases ``recheck``, ``retry``)
+    Asks the tool to re-evaluate a pull request now, transferring it
+    when a maintainer has approved it.  It exists because GitHub
+    withholds this repository's credentials from a review on a fork
+    pull request, so the approving review cannot perform the transfer
+    itself.
+
+    Open to any author: it makes the tool look again, and the answer
+    still comes from re-reading the pull request's reviews.
 """
 
 from __future__ import annotations
@@ -58,6 +79,7 @@ from dataclasses import field
 
 
 __all__ = [
+    "CMD_CHECK",
     "CMD_CREATE_MISSING",
     "COMMAND_REGISTRY",
     "CommandDefinition",
@@ -65,6 +87,7 @@ __all__ = [
     "CommandParseResult",
     "contains_directive",
     "find_command",
+    "find_open_command",
     "has_command",
     "list_commands",
     "parse_commands",
@@ -99,12 +122,19 @@ class CommandDefinition:
         description: Human-readable description shown in help output.
         hidden: If ``True`` the command is recognised but omitted from
             user-facing documentation helpers.
+        requires_trust: Whether the command may only be obeyed when a
+            trusted author issued it.  Defaults to ``True``, so a new
+            command is restricted to trusted authors unless it
+            deliberately opts out.  Only a command that *grants
+            nothing* may set this ``False`` — see
+            :func:`find_open_command`.
     """
 
     name: str
     aliases: tuple[str, ...] = ()
     description: str = ""
     hidden: bool = False
+    requires_trust: bool = True
 
     def all_phrases(self) -> tuple[str, ...]:
         """Return all phrases that match this command (canonical + aliases)."""
@@ -175,6 +205,25 @@ CMD_CREATE_MISSING = register_command(
             "find an existing one. Use this when the original 'opened' "
             "event failed and subsequent PR updates keep failing."
         ),
+    )
+)
+
+CMD_CHECK = register_command(
+    CommandDefinition(
+        name="check",
+        aliases=("recheck", "retry"),
+        description=(
+            "Re-evaluate this pull request now. Use it after a "
+            "maintainer approves a pull request raised from a fork: "
+            "the approving review cannot transfer the change itself, "
+            "because GitHub denies it this repository's credentials. "
+            "It re-reads the reviews and grants nothing by itself, so "
+            "anybody may ask for it."
+        ),
+        # The one command safe to obey from any author: it asks the
+        # tool to look again, and the looking re-takes every
+        # authorisation decision from the API.
+        requires_trust=False,
     )
 )
 
@@ -380,6 +429,50 @@ def find_command(
     return None
 
 
+def find_open_command(body: str, command_name: str) -> CommandMatch | None:
+    """Match a command in one comment body, ignoring who wrote it.
+
+    The single sanctioned bypass of the authorship filter described in
+    :mod:`github2gerrit.pr_directives`, and it refuses to serve a
+    command that has not declared itself safe to obey from anybody.
+
+    A command qualifies only when it **grants nothing**: it may cause
+    the tool to look at a pull request again, never to act on one.
+    Re-evaluation is safe from any author precisely because every
+    authorisation decision is re-taken from the API afterwards, so the
+    comment is a doorbell rather than a key.
+
+    Args:
+        body: A single comment body, unfiltered.
+        command_name: Canonical command name to search for.
+
+    Returns:
+        The :class:`CommandMatch` if found, otherwise ``None``.
+
+    Raises:
+        ValueError: If *command_name* is unregistered, or is one that
+            requires a trusted author.  Both are programming errors:
+            reaching this function with such a command means the
+            authorisation filter was bypassed by mistake.
+    """
+    target = command_name.lower().strip()
+    defn = next(
+        (c for c in COMMAND_REGISTRY if c.name.lower().strip() == target),
+        None,
+    )
+    if defn is None:
+        msg = f"unregistered command: {command_name!r}"
+        raise ValueError(msg)
+    if defn.requires_trust:
+        msg = (
+            f"command {defn.name!r} requires a trusted author; use "
+            "github2gerrit.pr_directives.find_pr_command instead"
+        )
+        raise ValueError(msg)
+
+    return find_command([body], defn.name)
+
+
 def list_commands() -> list[CommandDefinition]:
     """Return all registered (non-hidden) commands.
 
@@ -398,8 +491,15 @@ def _match_command(
     """Attempt to match *normalised* text against the phrase index.
 
     Tries an exact match first, then checks whether any registered
-    phrase is a prefix of the normalised text (to tolerate trailing
-    punctuation like periods or extra context).
+    phrase begins the normalised text (to tolerate trailing punctuation
+    like periods or extra context).
+
+    The prefix must end on a word boundary.  A bare string prefix would
+    make every longer word starting with a command name a match, so
+    ``check`` would answer for ``checkout this branch``, ``checker`` and
+    ``check_status``.  That matters more than it used to: the one-word
+    commands are short, common English stems, and one of them starts
+    the transfer pipeline.
 
     Returns:
         The canonical command name on match, or ``None``.
@@ -412,8 +512,16 @@ def _match_command(
     best_match: str | None = None
     best_length = 0
     for phrase, canonical in phrase_index.items():
-        if normalised.startswith(phrase) and len(phrase) > best_length:
-            best_match = canonical
-            best_length = len(phrase)
+        if not normalised.startswith(phrase) or len(phrase) <= best_length:
+            continue
+        # The character ending the phrase must not continue a word.
+        # Punctuation and whitespace both end one; a letter, digit or
+        # underscore means the text merely begins with the same stem.
+        # ``str.isalnum`` omits the underscore, so name it explicitly.
+        following = normalised[len(phrase)]
+        if following.isalnum() or following == "_":
+            continue
+        best_match = canonical
+        best_length = len(phrase)
 
     return best_match

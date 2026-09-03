@@ -15,11 +15,44 @@ from pathlib import Path
 
 
 __all__ = [
+    "RECHECK_EVENTS",
     "GitHubContext",
     "Inputs",
     "PROperationMode",
     "head_repo_is_trusted",
 ]
+
+
+RECHECK_EVENTS: frozenset[str] = frozenset(
+    {
+        "issue_comment",
+        "pull_request_review",
+    }
+)
+"""Events that ask the tool to look at a pull request again.
+
+Neither changes the pull request's code, so each maps to UPDATE: an
+existing Gerrit change should gain a patchset rather than a sibling.
+
+They exist because the fork approval gate needs a **privileged** run to
+notice that a maintainer has approved.  GitHub withholds secrets from
+``pull_request_review`` on a fork pull request, so the approval itself
+cannot be the run that acts on it (see
+:func:`github2gerrit.cli._skip_unprivileged_fork_run`).
+
+The important property is that these are *triggers only*.  They decide
+when to re-evaluate, never whether to proceed: authorisation is always
+re-read from the API by
+:func:`github2gerrit.pr_approval.evaluate_fork_approval`.  So which
+event fired, and who fired it, grants nothing — which is what lets the
+comment trigger accept a comment from anybody without weakening the
+gate.
+
+That argument holds only where a gate exists.  A same-repository pull
+request never reaches one, so a re-check on it is short-circuited
+entirely; see
+:func:`github2gerrit.cli._recheck_has_nothing_to_unblock`.
+"""
 
 
 def head_repo_is_trusted(repository: str, head_repo: str) -> bool:
@@ -147,19 +180,19 @@ class GitHubContext:
         (avoids granting secrets to untrusted fork code), while
         ``pull_request_target`` is accepted for backward compatibility.
 
-        ``pull_request_review`` maps to UPDATE.  A review changes no
-        code, so an existing Gerrit change should gain a patchset
-        rather than a sibling.  When the review is instead the event
-        that first unblocks a fork pull request, no change exists yet
-        and the create-missing fallback covers it — see
+        Every event in :data:`RECHECK_EVENTS` maps to UPDATE.  None of
+        them changes code, so an existing Gerrit change should gain a
+        patchset rather than a sibling.  When such an event is instead
+        the one that first unblocks a fork pull request, no change
+        exists yet and the create-missing fallback covers it — see
         ``Orchestrator._should_create_missing``.  Choosing CREATE here
         instead would raise a duplicate for the far commoner case of a
-        re-approval after a push.
+        re-check after a push.
 
         Returns:
             PROperationMode enum indicating the type of operation
         """
-        if self.event_name == "pull_request_review":
+        if self.event_name in RECHECK_EVENTS:
             return PROperationMode.UPDATE
 
         if self.event_name not in ("pull_request", "pull_request_target"):
