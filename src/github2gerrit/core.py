@@ -78,6 +78,7 @@ from .gitutils import git_show
 from .gitutils import run_cmd
 from .mapping_comment import ChangeIdMapping
 from .mapping_comment import serialize_mapping_comment
+from .models import RECHECK_EVENTS
 from .models import GitHubContext
 from .models import Inputs
 from .pr_content_filter import filter_pr_body
@@ -1655,7 +1656,7 @@ class Orchestrator:
         """Decide whether to fall back from UPDATE to CREATE.
 
         Three things authorise the fallback: the ``--create-missing``
-        flag, a review-triggered run on an untrusted head, and a
+        flag, a re-check run on an untrusted head, and a
         ``@github2gerrit create missing change`` comment from a trusted
         author.
 
@@ -1677,25 +1678,26 @@ class Orchestrator:
             )
             return True, "Triggered by the `--create-missing` flag."
 
-        # 2. A review is what unblocks a gated pull request, so a
-        #    review-triggered run may legitimately be the first one to
-        #    reach Gerrit. Treating a missing change as an error there
-        #    would fail every gated PR on its first approval.
+        # 2. A re-check is what unblocks a gated pull request, so such
+        #    a run may legitimately be the first one to reach Gerrit.
+        #    Treating a missing change as an error there would fail
+        #    every gated PR the first time it is authorised.
         #
         #    Scoped to heads that actually pass through the gate. A
-        #    same-repository PR was never gated, so a review on one
+        #    same-repository PR was never gated, so a re-check on one
         #    must not quietly override CREATE_MISSING=false.
-        if gh.event_name == "pull_request_review" and not gh.head_is_trusted:
+        if gh.event_name in RECHECK_EVENTS and not gh.head_is_trusted:
             log.info(
-                "✅ Review-triggered run for PR #%s from an untrusted head; "
+                "✅ Re-check run (%s) for PR #%s from an untrusted head; "
                 "authorising CREATE fallback because no Gerrit change "
                 "exists yet",
+                gh.event_name,
                 gh.pr_number,
             )
             return True, (
-                "Triggered by a maintainer's approving review, which is "
-                "the first run permitted to reach Gerrit for this pull "
-                "request."
+                "Triggered by a run re-checking a maintainer's approving "
+                "review, which is the first run permitted to reach Gerrit "
+                "for this pull request."
             )
 
         # 3. Scan PR comments for the directive

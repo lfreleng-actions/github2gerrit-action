@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import os
@@ -31,6 +32,7 @@ from urllib.parse import urlparse
 import typer
 
 from . import models
+from .approvers import resolve_additional_approvers
 from .config import _is_github_actions_context
 from .config import apply_config_to_env
 from .config import apply_parameter_derivation
@@ -80,9 +82,13 @@ from .netrc import NetrcParseError
 from .netrc import get_credentials_for_host
 from .pr_approval import APPROVAL_MARKER
 from .pr_approval import ApprovalStatus
+from .pr_approval import describe_approver_policy
 from .pr_approval import evaluate_fork_approval
 from .pr_approval import render_blocked_comment
 from .pr_approval import render_cleared_comment
+from .pr_commands import CMD_CHECK
+from .pr_commands import MENTION_PREFIX
+from .pr_commands import find_open_command
 from .rich_display import RICH_AVAILABLE
 from .rich_display import DummyProgressTracker
 from .rich_display import G2GProgressTracker
@@ -90,7 +96,6 @@ from .rich_display import display_pr_info
 from .rich_display import safe_console_print
 from .rich_display import safe_typer_echo
 from .rich_logging import setup_rich_aware_logging
-from .trust import describe_trust_policy
 from .utils import append_github_output
 from .utils import env_bool
 from .utils import env_str
@@ -253,6 +258,277 @@ def _resolve_pr_for_gate(gh: GitHubContext, data: Inputs) -> Any | None:
         return None
 
 
+_FORK_UNPRIVILEGED_EVENTS: frozenset[str] = frozenset(
+    {
+        "pull_request",
+        "pull_request_review",
+        "pull_request_review_comment",
+    }
+)
+"""Triggers that run unprivileged when the pull request is from a fork.
+
+All three run from ``refs/pull/<N>/merge`` and print GitHub's fork
+secret restriction in their own section of the events reference, so
+their workflow file is fork-authored and the run receives no repository
+secrets. ``pull_request_target``, ``issue_comment``, ``schedule`` and
+``workflow_run`` run from the default branch and are deliberately
+absent.
+
+Naming them, rather than inferring the condition from an absent key
+alone, keeps a genuinely unset secret loud everywhere else. A trigger
+GitHub adds later therefore fails noisily rather than skipping in
+silence, which is the safer direction for a diagnostic.
+"""
+
+
+def _skip_unprivileged_fork_run(data: Inputs, gh: GitHubContext) -> bool:
+    """Report whether this run could never have reached Gerrit.
+
+    A fork pull request delivered on an unprivileged trigger arrives
+    without ``GERRIT_SSH_PRIVKEY_G2G``, because GitHub withholds
+    secrets from runs whose workflow file comes from the fork. Neither
+    of the two things that happen next is honest about that:
+
+    * with ``G2G_USE_SSH_AGENT`` disabled, validation reports a missing
+      required input, describing a misconfiguration the operator does
+      not have, and
+    * with it enabled — the default — ``_setup_ssh`` skips silently,
+      the run fetches the fork, tells the contributor their pull
+      request is approved and transferring, and only then fails at the
+      push with an opaque SSH error.
+
+    Stopping here is both truthful and cheap, and it happens before any
+    fork content is fetched.
+
+    Returns:
+        ``True`` when the caller should stop, successfully. Missing
+        provenance answers ``False`` so that a genuinely unset secret
+        stays loud: skipping in silence is the worse failure, because
+        it is indistinguishable from success.
+    """
+    if not _is_github_actions_context():
+        return False
+    if data.gerrit_ssh_privkey_g2g:
+        return False
+    if env_bool("G2G_NO_GERRIT", False) or data.dry_run:
+        # Both are keyless by design. G2G_NO_GERRIT turns the Gerrit
+        # network operations into no-ops, and a dry run returns from
+        # ``Orchestrator.execute`` before SSH setup. The absent key is
+        # the point in each case, not a symptom, so reading it as one
+        # would stop the very exercise the mode exists for.
+        return False
+    if gh.event_name not in _FORK_UNPRIVILEGED_EVENTS:
+        return False
+    # The factual question, not the trust one. An unresolved head is
+    # not known to be a fork, and treating it as one here would hide a
+    # real misconfiguration on a same-repository pull request.
+    if not gh.is_fork_pr:
+        return False
+
+    log.info(
+        "⏩ Pull request #%s not processed by this run: GitHub withholds "
+        "repository secrets from a '%s' run on a fork pull request, so "
+        "no Gerrit key is available. This is how GitHub scopes the "
+        "trigger, not a misconfiguration — a privileged trigger "
+        "performs the transfer.",
+        gh.pr_number,
+        gh.event_name,
+    )
+    safe_console_print(
+        f"⏩ Skipped: a '{gh.event_name}' run on a fork pull request "
+        "receives no repository secrets",
+        style="yellow",
+    )
+    return True
+
+
+def _triggering_comment_body(gh: GitHubContext) -> str:
+    """Return the body of the comment that triggered this run.
+
+    Empty when the payload carries no comment, when the comment is on
+    an ordinary issue rather than a pull request, or when that pull
+    request is closed.
+
+    ``issue_comment`` fires for all three. The ``issue`` object carries
+    a ``pull_request`` member only for a pull request, and its
+    ``state`` distinguishes one still open. A closed pull request has
+    no gate left to lift, and letting the run continue would reach
+    ``_exit_for_pr_state_error`` and put a failing check on the pull
+    request — which any commenter could then do at will.
+
+    Checked here rather than left to the workflow: the reusable
+    workflow guards its job condition, but a composite-action caller
+    writes their own ``on:`` block with no such guard, and a directive
+    on issue N would otherwise be taken for pull request N.
+    """
+    evt = _load_event(gh.event_path)
+
+    issue = evt.get("issue")
+    if isinstance(issue, dict):
+        if not issue.get("pull_request"):
+            log.debug("Comment is on an issue rather than a pull request")
+            return ""
+        state = str(issue.get("state", "") or "").strip().lower()
+        if state and state != "open":
+            log.debug("Comment is on a %s pull request; nothing to do", state)
+            return ""
+
+    comment = evt.get("comment")
+    if isinstance(comment, dict):
+        body = comment.get("body")
+        if isinstance(body, str):
+            return body
+    return ""
+
+
+def _skip_unrequested_comment_run(gh: GitHubContext) -> bool:
+    """Report whether a comment run should stop without doing anything.
+
+    Subscribing to ``issue_comment`` would otherwise run the whole
+    pipeline on every remark anyone makes on any pull request. The
+    directive narrows that to comments actually asking for a re-check.
+
+    This is a **noise filter, not a security control**. The comment's
+    author is deliberately not consulted: asking the tool to look again
+    grants nothing, because the answer comes from
+    :func:`evaluate_fork_approval` re-reading the reviews. Anyone may
+    therefore ring the doorbell, and it is logged rather than refused.
+
+    Returns:
+        ``True`` when the caller should stop, successfully.
+    """
+    if gh.event_name != "issue_comment":
+        return False
+
+    body = _triggering_comment_body(gh)
+    if find_open_command(body, CMD_CHECK.name) is not None:
+        log.info(
+            "🔁 Re-checking PR #%s: a comment asked for it. Authorisation "
+            "is re-read from the pull request's reviews, so the request "
+            "itself confers nothing.",
+            gh.pr_number,
+        )
+        return False
+
+    log.debug(
+        "Comment on PR #%s carries no '%s %s' directive; nothing to do",
+        gh.pr_number,
+        MENTION_PREFIX,
+        CMD_CHECK.name,
+    )
+    return True
+
+
+def _recover_pr_metadata(
+    gh: GitHubContext, pr_obj: Any | None
+) -> GitHubContext:
+    """Recover pull request metadata from an already-fetched object.
+
+    A second chance at what :func:`_augment_pr_refs_if_needed` tries
+    first. That helper swallows its own failures and returns the
+    context unresolved, while the pull request fetched moments later is
+    a separate call that may well have succeeded — so the answer can be
+    in hand and unused.
+
+    Recovering only the provenance would be worse than recovering
+    nothing, because it would resolve the question that decides whether
+    to proceed while leaving the refs that decide *where*: an empty
+    ``base_ref`` lets target-branch resolution fall back to a default
+    branch, preparing a change against the wrong base. So this fills
+    everything the object can answer, exactly as the first attempt
+    does.
+    Each field is recovered independently. A pull request can expose
+    its refs while its head repository metadata is missing — a deleted
+    fork answers ``null`` for ``head.repo`` — and tying the refs to
+    the provenance would leave ``base_ref`` empty in exactly that
+    case, so workspace setup would skip the target branch and
+    resolution could fall back to a default one. Provenance that
+    cannot be established stays unresolved, and therefore gated.
+
+    Refs already present are left alone; the head SHA is replaced
+    whenever anything else was missing, because the event's own value
+    is the merge or default-branch commit rather than the pull request
+    head.
+
+    Returns *gh* unchanged when nothing was missing or the pull
+    request cannot answer.
+    """
+    if pr_obj is None:
+        return gh
+
+    env_updates: dict[str, str] = {}
+    head_repo = gh.head_repo
+    base_ref = gh.base_ref
+    head_ref = gh.head_ref
+    sha = gh.sha
+
+    if not head_repo:
+        found = _head_repo_for_pr(pr_obj)
+        if found:
+            env_updates["PR_HEAD_REPO"] = head_repo = found
+    if not base_ref:
+        found = _ref_for_pr(pr_obj, "base")
+        if found:
+            env_updates["GITHUB_BASE_REF"] = base_ref = found
+    if not head_ref:
+        found = _ref_for_pr(pr_obj, "head")
+        if found:
+            env_updates["GITHUB_HEAD_REF"] = head_ref = found
+
+    if not env_updates:
+        return gh
+
+    found = str(
+        getattr(getattr(pr_obj, "head", object()), "sha", "") or ""
+    ).strip()
+    if found:
+        env_updates["GITHUB_SHA"] = sha = found
+
+    # The orchestrator reads these back out of the environment, so
+    # writing them there is what makes the recovery visible to it.
+    # The context itself is amended rather than re-read, so a value
+    # the caller already held is never lost to an environment that
+    # happens to disagree.
+    for name, value in env_updates.items():
+        os.environ[name] = value
+    log.debug(
+        "Recovered PR #%s metadata from the fetched pull request: %s",
+        gh.pr_number,
+        ", ".join(sorted(env_updates)),
+    )
+
+    return dataclasses.replace(
+        gh,
+        head_repo=head_repo,
+        base_ref=base_ref,
+        head_ref=head_ref,
+        sha=sha,
+    )
+
+
+def _recheck_has_nothing_to_unblock(gh: GitHubContext) -> bool:
+    """Report whether a re-check run has no gate to lift.
+
+    A re-check exists to notice that a maintainer has authorised a
+    gated pull request. A same-repository head never passed through
+    the gate, so there is nothing to notice, and proceeding would
+    resubmit an unchanged commit every time somebody comments on,
+    approves or requests changes to a pull request.
+
+    This matters most for the comment doorbell, which deliberately
+    accepts any author on the grounds that asking the tool to look
+    again grants nothing. That holds only because the gate answers the
+    question — so without this, any commenter could drive an unchanged
+    same-repository pull request through the submission pipeline at
+    will.
+
+    Uses ``head_is_trusted``, so a pull request whose provenance is
+    unresolved is *not* short-circuited: the gate applies to those, and
+    skipping them would leave them permanently unable to transfer.
+    """
+    return gh.event_name in models.RECHECK_EVENTS and gh.head_is_trusted
+
+
 def _check_fork_approval(
     pr_obj: Any | None,
     gh: GitHubContext,
@@ -323,8 +599,20 @@ def _check_fork_approval(
         getattr(getattr(pr_obj, "user", None), "login", "") or ""
     ).strip()
 
+    # Opt-in approver sources are read from the *base* side of the
+    # pull request, taken from GitHub's own metadata. Using the head
+    # would let a fork nominate the people permitted to authorise it.
+    base = getattr(pr_obj, "base", None)
+    extra_approvers = resolve_additional_approvers(
+        base_repo=getattr(base, "repo", None),
+        base_ref=str(getattr(base, "ref", "") or "").strip(),
+    )
+
     status = evaluate_fork_approval(
-        pr_obj, head_sha=head_sha, author_login=author
+        pr_obj,
+        head_sha=head_sha,
+        author_login=author,
+        extra_approvers=extra_approvers,
     )
 
     if status.approved:
@@ -344,7 +632,7 @@ def _check_fork_approval(
         "Reviews count from: %s",
         gh.pr_number,
         status.reason,
-        describe_trust_policy(),
+        describe_approver_policy(),
     )
     safe_console_print(
         f"🛑 Awaiting maintainer approval: {status.reason}",
@@ -3144,14 +3432,11 @@ def _handle_single_pr(
     # Augment PR refs via API when in URL mode and token present
     gh = _augment_pr_refs_if_needed(gh)
 
-    # A review only exists to unblock a gated pull request. On a
-    # same-repository head there is nothing to unblock, so stop rather
-    # than resubmitting an unchanged commit every time somebody
-    # comments on, approves or requests changes to a pull request.
-    if gh.event_name == "pull_request_review" and gh.head_is_trusted:
+    if _recheck_has_nothing_to_unblock(gh):
         log.info(
-            "Review on PR #%s, whose head is in this repository; "
+            "Re-check (%s) for PR #%s, whose head is in this repository; "
             "nothing to unblock, so no transfer is needed",
+            gh.event_name,
             gh.pr_number,
         )
         sys.exit(int(ExitCode.SUCCESS))
@@ -3167,6 +3452,28 @@ def _handle_single_pr(
         # token cannot skip the gate.
         if pr_obj is None:
             pr_obj = _resolve_pr_for_gate(gh, data)
+
+        # Second chance at the pull request's own metadata, and a
+        # second look at the short-circuit above. An issue_comment
+        # payload carries none of it, so the check before this
+        # depended on _augment_pr_refs_if_needed's API call; that
+        # helper swallows a failure and returns the context
+        # unresolved, while the fetch just above is a separate call
+        # that may well have succeeded. Without this, one transient
+        # failure would let a commenter resubmit an unchanged
+        # same-repository pull request — exactly what the
+        # short-circuit exists to prevent — and would leave the base
+        # ref empty for the transfer that followed.
+        gh = _recover_pr_metadata(gh, pr_obj)
+        if _recheck_has_nothing_to_unblock(gh):
+            log.info(
+                "Re-check (%s) for PR #%s, whose head is in this "
+                "repository; nothing to unblock, so no transfer is needed",
+                gh.event_name,
+                gh.pr_number,
+            )
+            sys.exit(int(ExitCode.SUCCESS))
+
         allowed, approved_sha = _check_fork_approval(
             pr_obj, gh, progress_tracker
         )
@@ -3220,8 +3527,19 @@ def _handle_single_pr(
 
 def _process() -> None:
     data = _load_effective_inputs()
-    _validate_inputs_or_raise(data)
+
+    # Context before validation. A run that GitHub denied secrets to
+    # has nothing to validate, and reporting the absent key as a
+    # missing input would misdescribe the cause on an outside
+    # contributor's pull request. Reading the context is pure and
+    # cannot raise, so the reorder costs nothing.
     gh = _read_github_context()
+    if _skip_unprivileged_fork_run(data, gh):
+        return
+    if _skip_unrequested_comment_run(gh):
+        return
+
+    _validate_inputs_or_raise(data)
 
     # G2G_NO_GERRIT reuses the existing DRY_RUN +
     # G2G_DRYRUN_DISABLE_NETWORK code paths so that all tool logic runs

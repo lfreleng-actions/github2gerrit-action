@@ -95,6 +95,27 @@ inputs:
     description: "Use SSH agent for authentication instead of file-based keys (recommended)"
     required: false
     default: "true"
+  G2G_APPROVER_LOGINS:
+    description: >-
+      Comma-separated GitHub logins whose approving reviews clear the
+      fork approval gate regardless of their author_association. Only
+      needed where the people who review the code hold no standing on
+      the GitHub mirror.
+    required: false
+    default: ""
+  G2G_APPROVERS_FROM_INFO_YAML:
+    description: >-
+      Read approvers from the base repository's INFO.yaml, matching on
+      the github_id field. The fork's copy is never consulted.
+    required: false
+    default: "false"
+  G2G_INFO_YAML_MATCH_LFID:
+    description: >-
+      Also treat an INFO.yaml 'id' as a GitHub login. 'id' holds an
+      LFID, so enabling this lets whoever registers that username on
+      GitHub inherit committer authority. Enable only knowing the trade.
+    required: false
+    default: "false"
   DUPLICATE_TYPES:
     description: "Comma-separated Gerrit states for evaluating duplicates"
     required: false
@@ -294,8 +315,8 @@ runs:
         if [[ -z "${pr_in}" || "${pr_in}" == "null" ]]; then
           pr_in="0"
         fi
-        if ! [[ "${pr_in}" =~ ^[0-9]+$ ]]; then
-          echo "Error: PR_NUMBER must be a numeric value"
+        if ! [[ "${pr_in}" =~ ^(0|[1-9][0-9]*)$ ]]; then
+          echo "Error: PR_NUMBER must be a canonical numeric value (no leading zeros)"
           exit 2
         fi
         if [[ "${pr_in}" == "0" ]]; then
@@ -379,6 +400,10 @@ runs:
         DUPLICATE_TYPES: ${{ inputs.DUPLICATE_TYPES }}
         NORMALISE_COMMIT: ${{ inputs.NORMALISE_COMMIT }}
         G2G_USE_SSH_AGENT: ${{ inputs.G2G_USE_SSH_AGENT }}
+        G2G_APPROVER_LOGINS: ${{ inputs.G2G_APPROVER_LOGINS }}
+        # yamllint disable-line rule:line-length
+        G2G_APPROVERS_FROM_INFO_YAML: ${{ inputs.G2G_APPROVERS_FROM_INFO_YAML }}
+        G2G_INFO_YAML_MATCH_LFID: ${{ inputs.G2G_INFO_YAML_MATCH_LFID }}
         G2G_VERBOSE: ${{ inputs.VERBOSE }}
         AUTOMATION_ONLY: ${{ inputs.AUTOMATION_ONLY }}
         CLEANUP_ABANDONED: ${{ inputs.CLEANUP_ABANDONED }}

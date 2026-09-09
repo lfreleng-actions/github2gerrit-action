@@ -9,6 +9,8 @@ pin the conditions under which that is allowed.
 
 from __future__ import annotations
 
+import dataclasses
+import json
 import os
 from pathlib import Path
 from typing import Any
@@ -17,6 +19,10 @@ from unittest.mock import patch
 
 import pytest
 
+from github2gerrit.cli import _recheck_has_nothing_to_unblock
+from github2gerrit.cli import _recover_pr_metadata
+from github2gerrit.cli import _skip_unrequested_comment_run
+from github2gerrit.models import RECHECK_EVENTS
 from github2gerrit.models import GitHubContext
 from github2gerrit.models import PROperationMode
 from github2gerrit.pr_approval import APPROVAL_MARKER
@@ -24,6 +30,10 @@ from github2gerrit.pr_approval import ApprovalStatus
 from github2gerrit.pr_approval import evaluate_fork_approval
 from github2gerrit.pr_approval import render_blocked_comment
 from github2gerrit.pr_approval import render_cleared_comment
+from github2gerrit.pr_commands import CMD_CHECK
+from github2gerrit.pr_commands import CMD_CREATE_MISSING
+from github2gerrit.pr_commands import COMMAND_REGISTRY
+from github2gerrit.pr_commands import find_open_command
 
 
 BASE_REPO = "opendaylight/mdsal"
@@ -593,16 +603,341 @@ class TestApprovalNoticeRetraction:
         assert "fresh approval" in body
 
 
-class TestReviewEventOperationMode:
-    """A review must not create a sibling change."""
+class TestRecheckEventOperationMode:
+    """A re-check must not create a sibling change."""
 
-    def test_review_event_maps_to_update(self) -> None:
-        ctx = _ctx(event_name="pull_request_review")
+    @pytest.mark.parametrize("event_name", sorted(RECHECK_EVENTS))
+    def test_recheck_events_map_to_update(self, event_name: str) -> None:
+        ctx = _ctx(event_name=event_name)
         assert ctx.get_operation_mode() is PROperationMode.UPDATE
 
     def test_pull_request_events_unchanged(self) -> None:
         ctx = _ctx(event_name="pull_request_target")
         assert ctx.get_operation_mode() is PROperationMode.CREATE
+
+
+class TestCommentDoorbell:
+    """A comment decides *when* to look, never *whether* to proceed.
+
+    The directive is a noise filter: without it, subscribing to
+    ``issue_comment`` would run the whole pipeline on every remark.
+    Authorisation is re-read from the reviews afterwards, so the
+    comment's author is deliberately irrelevant.
+    """
+
+    def _ctx_with_comment(
+        self, tmp_path: Path, body: str, *, event_name: str = "issue_comment"
+    ) -> GitHubContext:
+        payload = tmp_path / "event.json"
+        payload.write_text(
+            json.dumps({"comment": {"body": body}}), encoding="utf-8"
+        )
+        return dataclasses.replace(
+            _ctx(event_name=event_name), event_path=payload
+        )
+
+    def test_directive_lets_the_run_continue(self, tmp_path: Path) -> None:
+        ctx = self._ctx_with_comment(tmp_path, "@github2gerrit check")
+        assert _skip_unrequested_comment_run(ctx) is False
+
+    @pytest.mark.parametrize("alias", ["check", "recheck", "retry"])
+    def test_aliases_are_accepted(self, tmp_path: Path, alias: str) -> None:
+        ctx = self._ctx_with_comment(tmp_path, f"@github2gerrit {alias}")
+        assert _skip_unrequested_comment_run(ctx) is False
+
+    def test_ordinary_comment_is_skipped(self, tmp_path: Path) -> None:
+        ctx = self._ctx_with_comment(tmp_path, "Looks good to me, thanks!")
+        assert _skip_unrequested_comment_run(ctx) is True
+
+    def test_bare_mention_is_not_a_directive(self, tmp_path: Path) -> None:
+        ctx = self._ctx_with_comment(tmp_path, "cc @github2gerrit")
+        assert _skip_unrequested_comment_run(ctx) is True
+
+    def test_payload_without_a_comment_is_skipped(self, tmp_path: Path) -> None:
+        payload = tmp_path / "event.json"
+        payload.write_text(json.dumps({}), encoding="utf-8")
+        ctx = dataclasses.replace(
+            _ctx(event_name="issue_comment"), event_path=payload
+        )
+        assert _skip_unrequested_comment_run(ctx) is True
+
+    def test_comment_on_an_ordinary_issue_is_skipped(
+        self, tmp_path: Path
+    ) -> None:
+        # issue_comment fires for issues too. Without this the issue
+        # number would be taken for a pull request number. Checked in
+        # the CLI because a composite-action caller writes their own
+        # `on:` block and so has no job-level guard.
+        payload = tmp_path / "event.json"
+        payload.write_text(
+            json.dumps(
+                {
+                    "issue": {"number": 29},
+                    "comment": {"body": "@github2gerrit check"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        ctx = dataclasses.replace(
+            _ctx(event_name="issue_comment"), event_path=payload
+        )
+        assert _skip_unrequested_comment_run(ctx) is True
+
+    def test_comment_on_a_pull_request_is_accepted(
+        self, tmp_path: Path
+    ) -> None:
+        payload = tmp_path / "event.json"
+        payload.write_text(
+            json.dumps(
+                {
+                    "issue": {
+                        "number": 29,
+                        "state": "open",
+                        "pull_request": {"url": "https://api/pulls/29"},
+                    },
+                    "comment": {"body": "@github2gerrit check"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        ctx = dataclasses.replace(
+            _ctx(event_name="issue_comment"), event_path=payload
+        )
+        assert _skip_unrequested_comment_run(ctx) is False
+
+    @pytest.mark.parametrize("state", ["closed", "CLOSED"])
+    def test_comment_on_a_closed_pull_request_is_skipped(
+        self, tmp_path: Path, state: str
+    ) -> None:
+        # A closed pull request has no gate left to lift. Continuing
+        # would reach _exit_for_pr_state_error and put a failing check
+        # on it, which any commenter could then do at will.
+        payload = tmp_path / "event.json"
+        payload.write_text(
+            json.dumps(
+                {
+                    "issue": {
+                        "number": 29,
+                        "state": state,
+                        "pull_request": {"url": "https://api/pulls/29"},
+                    },
+                    "comment": {"body": "@github2gerrit check"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        ctx = dataclasses.replace(
+            _ctx(event_name="issue_comment"), event_path=payload
+        )
+        assert _skip_unrequested_comment_run(ctx) is True
+
+    @pytest.mark.parametrize(
+        "event_name",
+        ["pull_request_target", "pull_request_review", "push"],
+    )
+    def test_other_events_are_never_filtered(
+        self, tmp_path: Path, event_name: str
+    ) -> None:
+        # The filter exists only to stop comment runs multiplying; it
+        # must not silently swallow any other trigger.
+        ctx = self._ctx_with_comment(
+            tmp_path, "no directive here", event_name=event_name
+        )
+        assert _skip_unrequested_comment_run(ctx) is False
+
+
+class TestOpenCommandRefusesPrivilegedCommands:
+    """The authorship bypass must stay confined to safe commands.
+
+    ``find_open_command`` is the one sanctioned way around the trust
+    filter that issue #382 introduced.  It has to refuse anything that
+    grants something, or the defect returns by the back door.
+    """
+
+    def test_check_is_servable_without_an_author(self) -> None:
+        match = find_open_command("@github2gerrit check", CMD_CHECK.name)
+        assert match is not None
+
+    def test_privileged_command_is_refused(self) -> None:
+        assert CMD_CREATE_MISSING.requires_trust is True
+        with pytest.raises(ValueError, match="requires a trusted author"):
+            find_open_command(
+                "@github2gerrit create missing change",
+                CMD_CREATE_MISSING.name,
+            )
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "@github2gerrit checkout this branch",
+            "@github2gerrit checker",
+            "@github2gerrit check_status",
+            "@github2gerrit rechecking the logs",
+            "@github2gerrit retry_later",
+            "@github2gerrit retryable",
+        ],
+    )
+    def test_longer_words_do_not_ring_the_doorbell(self, body: str) -> None:
+        # The matcher tolerates trailing text after a command, which
+        # without a word boundary makes every word starting with the
+        # command name a match. `check` is a short, common English
+        # stem, and matching it starts the transfer pipeline.
+        assert find_open_command(body, CMD_CHECK.name) is None
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "@github2gerrit check",
+            "@github2gerrit check.",
+            "@github2gerrit check please, it is approved",
+            "@github2gerrit recheck!",
+        ],
+    )
+    def test_trailing_text_is_still_tolerated(self, body: str) -> None:
+        assert find_open_command(body, CMD_CHECK.name) is not None
+
+    def test_unregistered_command_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="unregistered command"):
+            find_open_command("@github2gerrit nope", "nope")
+
+    def test_commands_require_trust_unless_they_opt_out(self) -> None:
+        # The default must stay restrictive, so a command added later
+        # is confined to trusted authors unless its author opted out.
+        opted_out = [c.name for c in COMMAND_REGISTRY if not c.requires_trust]
+        assert opted_out == [CMD_CHECK.name]
+
+
+class TestRecheckNeedsAGateToLift:
+    """A re-check on a same-repository head must do nothing.
+
+    The comment doorbell accepts any author, on the grounds that asking
+    the tool to look again grants nothing. That holds only because the
+    gate answers the question, and a same-repository pull request never
+    reaches the gate — so without this any commenter could drive an
+    unchanged pull request through the submission pipeline at will.
+    """
+
+    @pytest.mark.parametrize("event_name", sorted(RECHECK_EVENTS))
+    def test_trusted_head_has_nothing_to_unblock(self, event_name: str) -> None:
+        ctx = _ctx(event_name=event_name, head_repo=BASE_REPO)
+        assert _recheck_has_nothing_to_unblock(ctx) is True
+
+    @pytest.mark.parametrize("event_name", sorted(RECHECK_EVENTS))
+    def test_fork_head_proceeds(self, event_name: str) -> None:
+        ctx = _ctx(event_name=event_name, head_repo=FORK_REPO)
+        assert _recheck_has_nothing_to_unblock(ctx) is False
+
+    @pytest.mark.parametrize("event_name", sorted(RECHECK_EVENTS))
+    def test_unresolved_provenance_proceeds(self, event_name: str) -> None:
+        # The gate applies to an unresolved head, so short-circuiting
+        # here would leave it permanently unable to transfer.
+        ctx = _ctx(event_name=event_name, head_repo="")
+        assert _recheck_has_nothing_to_unblock(ctx) is False
+
+    @pytest.mark.parametrize(
+        "event_name", ["pull_request_target", "pull_request", "push"]
+    )
+    def test_other_events_are_unaffected(self, event_name: str) -> None:
+        ctx = _ctx(event_name=event_name, head_repo=BASE_REPO)
+        assert _recheck_has_nothing_to_unblock(ctx) is False
+
+
+class TestPullRequestMetadataRecovery:
+    """A second chance at metadata the payload did not carry.
+
+    An ``issue_comment`` payload has none of it, so the first attempt
+    depends on an API call that swallows its own failures. The pull
+    request fetched moments later is a separate call, and one transient
+    failure must not leave a same-repository pull request looking gated
+    — nor leave the base ref empty for a transfer that follows.
+    """
+
+    def _pr(
+        self,
+        full_name: str | None,
+        *,
+        base_ref: str = "stable/scandium",
+        head_ref: str = "topic",
+        head_sha: str = HEAD_SHA,
+    ) -> Any:
+        pr = MagicMock()
+        pr.head.repo.full_name = full_name
+        pr.base.ref = base_ref
+        pr.head.ref = head_ref
+        pr.head.sha = head_sha
+        return pr
+
+    @pytest.fixture(autouse=True)
+    def _clean_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        for var in (
+            "PR_HEAD_REPO",
+            "GITHUB_BASE_REF",
+            "GITHUB_HEAD_REF",
+            "GITHUB_SHA",
+        ):
+            monkeypatch.setenv(var, "")
+        monkeypatch.setenv("GITHUB_REPOSITORY", BASE_REPO)
+        monkeypatch.setenv("GITHUB_EVENT_NAME", "issue_comment")
+        monkeypatch.setenv("PR_NUMBER", "29")
+
+    def _recover(self, head_repo: str, pr: Any) -> Any:
+        ctx = _ctx(event_name="issue_comment", head_repo=head_repo)
+        ctx = dataclasses.replace(ctx, base_ref="", head_ref="")
+        return _recover_pr_metadata(ctx, pr)
+
+    def test_provenance_is_recovered(self) -> None:
+        recovered = self._recover("", self._pr(BASE_REPO))
+        assert recovered.head_repo == BASE_REPO
+        assert recovered.head_is_trusted is True
+        assert _recheck_has_nothing_to_unblock(recovered) is True
+
+    def test_refs_are_recovered_alongside_provenance(self) -> None:
+        # Recovering only the head repository would answer whether to
+        # proceed while leaving where to push unresolved, and an empty
+        # base ref lets target resolution fall back to a default
+        # branch.
+        recovered = self._recover("", self._pr(FORK_REPO))
+        assert recovered.base_ref == "stable/scandium"
+        assert recovered.head_ref == "topic"
+        assert recovered.sha == HEAD_SHA
+
+    def test_a_fork_head_still_proceeds(self) -> None:
+        recovered = self._recover("", self._pr(FORK_REPO))
+        assert recovered.head_repo == FORK_REPO
+        assert _recheck_has_nothing_to_unblock(recovered) is False
+
+    def test_known_provenance_is_never_overwritten(self) -> None:
+        # A head already resolved came from the event payload or an
+        # earlier API call, and must not be replaced by a value taken
+        # from an object the caller supplied.
+        recovered = self._recover(FORK_REPO, self._pr(BASE_REPO))
+        assert recovered.head_repo == FORK_REPO
+
+    def test_a_pull_request_that_cannot_answer_changes_nothing(self) -> None:
+        pr = MagicMock()
+        pr.head.repo.full_name = ""
+        pr.base.ref = ""
+        pr.head.ref = ""
+        pr.head.sha = ""
+        recovered = self._recover("", pr)
+        assert recovered.head_repo == ""
+        assert recovered.base_ref == ""
+
+    def test_refs_recover_without_provenance(self) -> None:
+        # A deleted fork answers null for head.repo while still
+        # exposing its refs. Tying the two together would leave
+        # base_ref empty exactly there, so workspace setup would skip
+        # the target branch and resolution could fall back to a
+        # default one.
+        recovered = self._recover("", self._pr(None))
+        assert recovered.base_ref == "stable/scandium"
+        assert recovered.head_ref == "topic"
+        # Provenance stays unresolved, so the pull request stays gated.
+        assert recovered.head_repo == ""
+        assert recovered.head_is_trusted is False
+
+    def test_no_pull_request_changes_nothing(self) -> None:
+        assert self._recover("", None).head_repo == ""
 
 
 class TestBlockedCommentWording:
@@ -618,8 +953,8 @@ class TestBlockedCommentWording:
         assert "could not establish" in body
 
 
-class TestReviewTriggersCreateMissing:
-    """First approval of a fork PR has no change to update."""
+class TestRecheckTriggersCreateMissing:
+    """First authorisation of a fork PR has no change to update."""
 
     def _should_create(
         self, event_name: str, head_repo: str = FORK_REPO
@@ -634,8 +969,17 @@ class TestReviewTriggersCreateMissing:
         with patch("github2gerrit.core.build_client", side_effect=OSError):
             return orch._should_create_missing(inputs, gh)[0]
 
-    def test_review_event_authorises_create(self) -> None:
-        assert self._should_create("pull_request_review") is True
+    @pytest.mark.parametrize("event_name", sorted(RECHECK_EVENTS))
+    def test_recheck_event_authorises_create(self, event_name: str) -> None:
+        # Whichever trigger notices the approval may be the first run
+        # permitted to reach Gerrit, so all of them need the fallback.
+        assert self._should_create(event_name) is True
+
+    @pytest.mark.parametrize("event_name", sorted(RECHECK_EVENTS))
+    def test_same_repo_head_is_not_authorised(self, event_name: str) -> None:
+        # A same-repository PR was never gated, so a re-check on one
+        # must not override CREATE_MISSING=false.
+        assert self._should_create(event_name, head_repo=BASE_REPO) is False
 
     def test_reason_names_the_review(self) -> None:
         """The notice must not claim a comment or flag triggered it."""

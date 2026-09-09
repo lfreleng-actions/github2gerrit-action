@@ -161,8 +161,19 @@ accounts rather than the project's reviewers.
 | Command                 | Aliases                            | Description                                                                 |
 | ----------------------- | ---------------------------------- | --------------------------------------------------------------------------- |
 | `create missing change` | `create-missing`, `create missing` | Create a Gerrit change when an UPDATE operation cannot find an existing one |
+| `check`                 | `recheck`, `retry`                 | Re-evaluate a pull request now, transferring it if a maintainer approved it |
 
 <!-- markdownlint-enable MD013 -->
+
+The two differ in who may issue them. `create missing change` causes the tool
+to *act*, so only a trusted author may give it. `check` causes the tool to
+*look again*, and the looking re-takes every authorisation decision from the
+API, so anybody may ask for it — see
+[which triggers can lift the gate](#which-triggers-can-lift-the-gate).
+
+The command itself carries that distinction, as `requires_trust`, which
+defaults to restricting a command. A new command stays confined to trusted
+authors unless its author deliberately opts out.
 
 ### Create Missing Change
 
@@ -441,21 +452,107 @@ own pull request, and that guarantee is a large part of why the tool uses
 reviews rather than comment directives — on a Gerrit mirror the pull request
 author often holds the same organization membership as the reviewers.
 
-#### Enabling re-runs on approval
+#### Which triggers can lift the gate
 
-`pull_request_target` carries no event for a submitted review, so approving a
-pull request does nothing unless the calling workflow listens for it:
+Only a **privileged** run can transfer an approved fork pull request, because
+only a privileged run receives `GERRIT_SSH_PRIVKEY_G2G`. GitHub withholds
+repository secrets from a workflow whose file comes from the fork, and that
+distinction follows the trigger:
+
+| Trigger               | Runs from             | Secrets on a fork PR |
+| --------------------- | --------------------- | -------------------- |
+| `pull_request_target` | Default branch        | Yes                  |
+| `issue_comment`       | Default branch        | Yes                  |
+| `schedule`            | Default branch        | Yes                  |
+| `pull_request`        | `refs/pull/<N>/merge` | No                   |
+| `pull_request_review` | `refs/pull/<N>/merge` | No                   |
+
+**A review cannot lift the gate by itself.** The run it starts has
+no Gerrit key, so it stops immediately and says so rather than failing. This
+is a property of GitHub's trigger model, not of this tool, and no
+configuration changes it.
+
+The tool separates the two roles this confuses. A trigger decides *when* to
+look again; it needs no trust, because looking again is harmless. Approval
+decides *whether* to proceed, and the tool always re-reads it from the pull
+request's reviews. So no trigger, and nobody who fires one, can grant
+anything.
+
+Of the privileged triggers, this mechanism uses `issue_comment`.
+
+**A comment** is the privileged re-check. Subscribe to `issue_comment`:
 
 ```yaml
 on:
   pull_request_target:
     types: [opened, reopened, edited, synchronize, closed]
-  pull_request_review:
-    types: [submitted, dismissed]
+  issue_comment:
+    types: [created]
 ```
 
-Without that trigger the tool only reconsiders a pull request on its next
-push, or when a maintainer dispatches the workflow by hand.
+Once a maintainer has approved, anyone may post `@github2gerrit check` to
+transfer the change. The directive keeps ordinary conversation from starting a
+run, and performs no permission check. It grants nothing, because the answer
+still comes from re-reading the reviews — an unapproved pull request simply
+gets its notice updated and stays put.
+
+On a **same-repository** pull request a re-check stops without transferring,
+since no gate ever applied to it. So nobody can use a comment to force
+repeated submissions of an automation pull request.
+
+This trigger needs `AUTOMATION_ONLY: false`. It defaults to `true` and closes
+a human-authored pull request before the gate sees it, which would leave
+nothing to unblock.
+
+A zero-touch variant — a periodic sweep that notices the approval without
+anyone commenting — remains open as
+[#421](https://github.com/lfreleng-actions/github2gerrit-action/issues/421).
+A repository-wide job needs cross-run serialisation that GitHub's per-job
+concurrency groups cannot express, so this mechanism deliberately omits it.
+
+`pull_request_review` should be **removed** from any workflow that still
+carries it. It can no longer transfer anything: on a fork pull request it runs
+unprivileged, and on a same-repository one the tool exits without transferring,
+because re-submitting an unchanged commit every time somebody reviews it would
+add a patchset for nothing.
+
+Worse than useless, in fact. A review-triggered run takes a slot in the pull
+request's concurrency group, and GitHub keeps only one running and one pending
+run per group, so a review arriving while a transfer runs can evict a pending
+`@github2gerrit check` and lose the re-check. The bundled reusable workflow
+refuses review events for that reason; a workflow calling the composite action
+directly should simply not subscribe to them.
+
+Note that approving and then pushing does **not** transfer the change either.
+A push moves the head, which makes the earlier approval stale by the rule
+described above, and approving afterwards only starts an unprivileged review
+run. Re-approve the new head, then comment.
+
+#### Naming approvers directly
+
+Where the people who review the code hold no GitHub standing on the mirror,
+no review can ever clear the gate. Two opt-in sources address that, both off
+by default because each widens who counts as a maintainer:
+
+- `G2G_APPROVER_LOGINS` — a comma-separated list of GitHub logins.
+- `G2G_APPROVERS_FROM_INFO_YAML` — read the project lead and committers from
+  the **base** repository's `INFO.yaml`, at the pull request's base ref. A
+  fork's copy is never consulted, for the same reason its `.gitreview` is not,
+  and an unknown base ref declines the read rather than falling back to the
+  default branch. The tool skips `primary_contact`: it names whoever
+  fields questions about the project, which is not the same as who may
+  authorise.
+
+Both are action inputs, and the reusable workflow forwards them.
+
+`INFO.yaml` matches on `github_id`. Its `id` field holds an LFID, not a GitHub
+login, so matching on it lets whoever registers that username on GitHub
+inherit committer authority; `G2G_INFO_YAML_MATCH_LFID` enables that
+separately, and a project should turn it on only knowing the trade. Where a
+person carries a `github_id`, their `id` is never also admitted.
+
+A named approver gains standing and nothing else. The head-commit binding, the
+changes-requested block and the author exclusion all still apply.
 
 #### When the gate blocks
 
