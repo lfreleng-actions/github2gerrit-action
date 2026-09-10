@@ -1739,7 +1739,7 @@ def main(
 
 
 def _setup_logging() -> logging.Logger:
-    level_name = os.getenv("G2G_LOG_LEVEL", "WARNING").upper()
+    level_name = (os.getenv("G2G_LOG_LEVEL") or "WARNING").strip().upper()
     level = getattr(logging, level_name, logging.WARNING)
     fmt = (
         "%(asctime)s %(levelname)-8s %(name)s %(filename)s:%(lineno)d | "
@@ -1751,7 +1751,7 @@ def _setup_logging() -> logging.Logger:
 
 def _reconfigure_logging() -> None:
     """Reconfigure logging level based on current environment variables."""
-    level_name = os.getenv("G2G_LOG_LEVEL", "WARNING").upper()
+    level_name = (os.getenv("G2G_LOG_LEVEL") or "WARNING").strip().upper()
     level = getattr(logging, level_name, logging.WARNING)
     logging.getLogger().setLevel(level)
     for handler in logging.getLogger().handlers:

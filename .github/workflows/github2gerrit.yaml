@@ -476,6 +476,13 @@ jobs:
           # per-run choices, and an organisation can set one once for
           # every repository beneath it.
           #
+          # An undefined variable renders as the empty string and the
+          # variable is then present-but-blank in the runner, so every
+          # consumer of these has to treat blank as absent or a caller
+          # who configured nothing would lose the default. env_bool
+          # does that for the booleans; G2G_LOG_LEVEL and
+          # G2G_TOPIC_PREFIX fall back explicitly at their read sites.
+          #
           # Only G2G_-prefixed names are forwarded this way. An
           # unprefixed variable such as REUSE_STRATEGY could collide
           # with one a project already keeps for its own purposes, and
@@ -492,6 +499,7 @@ jobs:
           G2G_SKIP_GERRIT_COMMENTS: ${{ vars.G2G_SKIP_GERRIT_COMMENTS }}
           G2G_ENABLE_DERIVATION: ${{ vars.G2G_ENABLE_DERIVATION }}
           G2G_ANON_SUPERSEDE_FALLBACK: ${{ vars.G2G_ANON_SUPERSEDE_FALLBACK }}
+          G2G_SHOW_PROGRESS: ${{ vars.G2G_SHOW_PROGRESS }}
           G2G_LOG_LEVEL: ${{ vars.G2G_LOG_LEVEL }}
           # yamllint enable rule:line-length
         with:

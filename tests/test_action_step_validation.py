@@ -135,9 +135,10 @@ _SUPPLIED_BY_THE_ACTION = frozenset(
 _LOCAL_CLI_ONLY = frozenset(
     {
         # Meaningful only when a person runs the tool themselves.
+        # G2G_SHOW_PROGRESS is deliberately absent: the Actions paths
+        # read it too, so it is forwarded rather than exempted.
         "G2G_AUTO_SAVE_CONFIG",
         "G2G_RESPECT_USER_SSH",
-        "G2G_SHOW_PROGRESS",
     }
 )
 
@@ -197,11 +198,16 @@ class TestEveryKnownSettingIsReachable:
         )
         # Either block reaches the tool: `with` becomes an action
         # input, `env` is inherited by the composite action's steps.
+        #
+        # The referenced variable has to carry the destination's own
+        # name. Accepting any `vars.` reference would let a swapped
+        # mapping such as `G2G_TOPIC_PREFIX: ${{ vars.G2G_LOG_LEVEL }}`
+        # satisfy the invariant while neither setting arrives.
         forwarded = {
             name
             for block in (step.get("with", {}), step.get("env", {}))
             for name, value in block.items()
-            if "vars." in str(value)
+            if f"vars.{name}" in str(value)
         }
         return declared | forwarded
 

@@ -141,19 +141,27 @@ from the GitHub API skips the check and recreates the original defect.
 Override the trusted set with `G2G_TRUSTED_ASSOCIATIONS`, a comma-separated
 list. Setting it to `OWNER` alone is the strictest useful value.
 
-Set it as a **repository or organisation variable**, which both integration
-options honour and which an organisation can apply once across every
-repository beneath it:
+Set it as a **repository or organisation variable**. The reusable workflow
+forwards it to the action, so an organisation can set it once and every
+repository beneath it inherits the policy:
 
 ```plaintext
 Repository → Settings → Secrets and variables → Actions → Variables
   G2G_TRUSTED_ASSOCIATIONS = OWNER,MEMBER
 ```
 
-A workflow calling the composite action directly may instead set it with
-`env:` on the job or step. That does **not** work through the reusable
-workflow: environment variables do not cross a `workflow_call` boundary, so
-the setting would be silently ignored and the default kept.
+A workflow calling the **composite action directly** does not inherit
+repository variables. Map the value in yourself:
+
+```yaml
+      - uses: lfreleng-actions/github2gerrit-action@main
+        env:
+          G2G_TRUSTED_ASSOCIATIONS: ${{ vars.G2G_TRUSTED_ASSOCIATIONS }}
+```
+
+Plain `env:` in a caller of the **reusable** workflow has no effect at all:
+environment variables do not cross a `workflow_call` boundary, so the setting
+would be silently ignored and the default kept.
 
 An empty or blank value keeps the default rather than trusting nobody or
 everyone.
