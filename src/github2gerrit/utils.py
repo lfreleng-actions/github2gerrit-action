@@ -17,18 +17,24 @@ from typing import Any
 def env_bool(name: str, default: bool = False) -> bool:
     """Parse boolean environment variable correctly handling string values.
 
+    A variable that is present but **blank** counts as absent and
+    yields *default*.  Workflows routinely set a variable to the empty
+    string — ``${{ vars.SOMETHING }}`` renders that way when the
+    repository variable is undefined — and reading it as ``False``
+    would silently disable every setting that defaults to true, for
+    every consumer that never configured it.
+
     Args:
         name: Environment variable name
-        default: Default value if variable is not set
+        default: Default value when the variable is unset or blank
 
     Returns:
         Boolean value parsed from environment variable
     """
     val = os.getenv(name)
-    if val is None:
+    if val is None or not val.strip():
         return default
-    s = val.strip().lower()
-    return s in ("1", "true", "yes", "on")
+    return val.strip().lower() in ("1", "true", "yes", "on")
 
 
 def env_str(name: str, default: str = "") -> str:

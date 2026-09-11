@@ -55,6 +55,8 @@ from pathlib import Path
 from typing import Any
 from typing import cast
 
+from .utils import env_bool
+
 
 log = logging.getLogger("github2gerrit.config")
 
@@ -798,14 +800,12 @@ def apply_parameter_derivation(
         return cfg
 
     is_github_actions = _is_github_actions_context()
-    enable_derivation = os.getenv(
-        "G2G_ENABLE_DERIVATION", "true"
-    ).strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    )
+    # Read through env_bool rather than parsing here, so a blank value
+    # counts as absent. A reusable workflow forwarding an undefined
+    # repository variable sets this to the empty string, and treating
+    # that as "false" would disable derivation for every consumer who
+    # never configured it.
+    enable_derivation = env_bool("G2G_ENABLE_DERIVATION", True)
 
     if not enable_derivation:
         log.debug(

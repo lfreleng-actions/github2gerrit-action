@@ -155,7 +155,29 @@ set by GitHub Actions) and undergo proper boolean parsing.
 
 ## Environment-Only Variables
 
-Some settings have no CLI flag and use environment variables:
+Some settings have no CLI flag and use environment variables.
+
+When running the tool as a GitHub Action, how you set one depends on the
+integration:
+
+- **Reusable workflow** — the workflow forwards exactly these seven names from
+  repository or organisation **variables**:
+  `G2G_TRUSTED_ASSOCIATIONS`, `G2G_TOPIC_PREFIX`, `G2G_SKIP_GERRIT_COMMENTS`,
+  `G2G_ENABLE_DERIVATION`, `G2G_ANON_SUPERSEDE_FALLBACK`, `G2G_SHOW_PROGRESS`
+  and `G2G_LOG_LEVEL`. Anything else in this table needs a workflow input
+  (see the README's interface table), because environment variables do not
+  cross a `workflow_call` boundary and `env:` in the caller is silently
+  ignored.
+- **Composite action** — set any of them with `env:` on the job or step.
+  Repository variables are *not* inherited automatically here; map them
+  yourself with `${{ vars.NAME }}` if that is where you keep them.
+
+The workflow forwards only `G2G_`-prefixed names. The unprefixed
+reconciliation settings could collide with a variable a project already keeps
+for something else, so they remain composite-action only.
+
+An undefined repository variable renders as an empty string, so every
+forwarded setting treats blank as unset and keeps its documented default.
 
 <!-- markdownlint-disable MD013 -->
 

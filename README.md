@@ -273,9 +273,20 @@ Every input maps to an environment variable of the same name
 flags. Reconciliation tuning (`SIMILARITY_SUBJECT`,
 `SIMILARITY_UPDATE_FACTOR`, `SIMILARITY_FILES`, `REUSE_STRATEGY`) is
 available through environment variables and CLI flags only; set these
-via `env:` on the action step when needed. See
+via `env:` on the action step when needed. That works for the
+composite action but **not** through the reusable workflow, where
+environment variables do not cross the `workflow_call` boundary. See
 [docs/cli.md](docs/cli.md) for the full option reference and
 [docs/features.md](docs/features.md) for feature-specific settings.
+
+Seven `G2G_`-prefixed settings have no input of their own — among them
+`G2G_TRUSTED_ASSOCIATIONS`, `G2G_TOPIC_PREFIX` and
+`G2G_ENABLE_DERIVATION`. The reusable workflow forwards these from
+repository or organisation **variables**, so an organisation can set
+one once for every repository beneath it. A workflow calling the
+composite action directly does not inherit those variables; map them
+in with `env:` yourself. See [docs/cli.md](docs/cli.md) for the full
+list.
 
 The three `G2G_APPROVER*` inputs widen who may clear the fork approval
 gate, and each defaults to off. `G2G_INFO_YAML_MATCH_LFID` carries a
