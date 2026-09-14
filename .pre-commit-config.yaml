@@ -128,8 +128,8 @@ repos:
           - responses==0.26.3
           - rich==15.0.0
           - typer==0.27.2
-          - types-PyYAML==6.0.12.20260815
-          - types-requests==2.33.0.20260712
+          - types-PyYAML==6.0.12.20260906
+          - types-requests==2.33.0.20260906
 
   - repo: https://github.com/btford/write-good
     rev: ab66ce10136dfad5146e69e70f82a3efac8842c1 # frozen: v1.0.8
