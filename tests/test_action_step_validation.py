@@ -9,6 +9,7 @@ integration between action steps.
 
 from __future__ import annotations
 
+import copy
 import os
 import re
 import subprocess
@@ -116,6 +117,269 @@ class TestReusableWorkflowCheckoutOrder:
         assert "pull_request" not in str(seed.get("with", {}).get("ref", ""))
 
 
+# Whole-identifier matchers for workflow expression references. A
+# substring test is not good enough for either: `inputs.GERRIT_SERVER`
+# is a prefix of `inputs.GERRIT_SERVER_PORT`, and `vars.G2G_LOG_LEVEL`
+# of `vars.G2G_LOG_LEVEL_SUFFIX`, so a typo or a swapped mapping would
+# satisfy a naive check while the intended setting never arrives.
+_INPUT_REFERENCE = re.compile(r"inputs\.([A-Za-z_][A-Za-z0-9_]*)")
+_VARS_REFERENCE = re.compile(r"vars\.([A-Za-z_][A-Za-z0-9_]*)")
+
+
+# Recognised settings a consumer cannot supply through the reusable
+# workflow, each with the reason it is deliberately out of reach. See
+# TestEveryKnownSettingIsReachable for what this list holds to account.
+_SUPPLIED_BY_THE_ACTION = frozenset(
+    {
+        # The action provides these itself.
+        "GITHUB_TOKEN",
+        "GH_TOKEN",
+        "GERRIT_SSH_PRIVKEY_G2G",  # a secret, not an input
+        # Derived from another input rather than set directly.
+        # G2G_VERBOSE is deliberately absent: the VERBOSE input
+        # exports to it, so the invariant reaches it on its own.
+        "SYNC_ALL_OPEN_PRS",  # from PR_NUMBER
+        "G2G_DRYRUN_DISABLE_NETWORK",  # from G2G_NO_GERRIT
+    }
+)
+
+_LOCAL_CLI_ONLY = frozenset(
+    {
+        # Meaningful only when a person runs the tool themselves.
+        # G2G_SHOW_PROGRESS is deliberately absent: the Actions paths
+        # read it too, so it is forwarded rather than exempted.
+        "G2G_AUTO_SAVE_CONFIG",
+        "G2G_RESPECT_USER_SSH",
+    }
+)
+
+_TESTING_ONLY = frozenset({"CI_TESTING", "USE_LOCAL_ACTION"})
+
+_COMPOSITE_ACTION_ONLY = frozenset(
+    {
+        # Reconciliation tuning, documented as env-only. The names are
+        # unprefixed, so forwarding them from repository variables
+        # risks colliding with a variable a project already keeps for
+        # something else, and silently changing behaviour on a name
+        # clash is worse than the present limitation.
+        "REUSE_STRATEGY",
+        "SIMILARITY_SUBJECT",
+        "SIMILARITY_UPDATE_FACTOR",
+        "SIMILARITY_FILES",
+        "ALLOW_ORPHAN_CHANGES",
+        "PERSIST_SINGLE_MAPPING_COMMENT",
+        "LOG_RECONCILE_JSON",
+        "VERIFY_DIGEST_STRICT",
+    }
+)
+
+_OUT_OF_REACH = (
+    _SUPPLIED_BY_THE_ACTION
+    | _LOCAL_CLI_ONLY
+    | _TESTING_ONLY
+    | _COMPOSITE_ACTION_ONLY
+)
+
+
+class TestEveryKnownSettingIsReachable:
+    """Recognised configuration must be settable through the action.
+
+    ``config.KNOWN_KEYS`` is the registry of settings the tool accepts.
+    A key in that set which no consumer can supply is not a missing
+    feature but a silent one: the project sets it, sees no warning, and
+    gets the default. That failure has now appeared three times — the
+    approver sources, the trusted associations, and the settings the
+    README told people to pass with ``env:``, which does not cross a
+    ``workflow_call`` boundary.
+
+    So the rule is stated once here rather than rediscovered. The
+    invariant follows the whole chain a value travels, because a break
+    anywhere along it is equally silent. A key is reachable when the
+    reusable workflow supplies it, from an input or a repository
+    variable, either
+
+    * straight into the composite action's environment, or
+    * as an action input that ``action.yaml`` **declares** — counting
+      the CLI variable it exports to, since ``VERBOSE`` arrives as
+      ``G2G_VERBOSE``.
+
+    Counting a ``workflow_call`` declaration as sufficient would let a
+    key pass while ``action.yaml`` knows nothing about it, which
+    GitHub reports only as an unexpected-input warning buried in the
+    log.
+
+    Anything genuinely out of reach is listed above with its reason,
+    so adding a key forces that choice instead of leaving it to
+    chance.
+    """
+
+    CLI_STEP = "Run github2gerrit Python CLI"
+    ACTION_STEP = "Run github2gerrit composite action"
+
+    def _step(self, config, key, name):
+        """Return the named step from a workflow job or action."""
+        container = config[key]
+        steps = (
+            container["steps"]
+            if "steps" in container
+            else container["github2gerrit"]["steps"]
+        )
+        return next(s for s in steps if s.get("name") == name)
+
+    def _action_exports(self, action_config) -> dict[str, set[str]]:
+        """Map each CLI variable to the action inputs that can set it.
+
+        The names need not match: ``VERBOSE`` reaches the tool as
+        ``G2G_VERBOSE``. Only inputs the action actually declares
+        count, since anything else is an expression GitHub resolves to
+        nothing.
+        """
+        declared = set(action_config["inputs"])
+        step = self._step(action_config, "runs", self.CLI_STEP)
+        exports: dict[str, set[str]] = {}
+        for variable, value in step.get("env", {}).items():
+            sources = set(_INPUT_REFERENCE.findall(str(value))) & declared
+            if sources:
+                exports[variable] = sources
+        return exports
+
+    def _reachable(self, reusable_workflow, action_config) -> set[str]:
+        triggers = reusable_workflow.get("on", reusable_workflow.get(True))
+        workflow_inputs = set(triggers["workflow_call"]["inputs"])
+        step = self._step(reusable_workflow, "jobs", self.ACTION_STEP)
+
+        def supplied(name: str, value: str) -> bool:
+            """Can a consumer decide *name* through this expression?
+
+            The reference has to carry the destination's own name.
+            Accepting any input or variable would let a swap such as
+            ``G2G_TOPIC_PREFIX: ${{ vars.G2G_LOG_LEVEL }}`` mark both
+            reachable while neither arrives — the silent misrouting
+            this invariant exists to catch.
+            """
+            from_input = (
+                name in workflow_inputs
+                and name in _INPUT_REFERENCE.findall(value)
+            )
+            return from_input or name in _VARS_REFERENCE.findall(value)
+
+        # Set straight into the composite action's environment, which
+        # its steps inherit.
+        reachable = {
+            variable
+            for variable, value in step.get("env", {}).items()
+            if supplied(variable, str(value))
+        }
+
+        # Or passed as an action input. It has to be one action.yaml
+        # declares: a workflow may forward a name the action never
+        # heard of, which GitHub reports only as an unexpected-input
+        # warning buried in the log, and the setting then arrives
+        # nowhere.
+        supplied_inputs = {
+            name
+            for name, value in step.get("with", {}).items()
+            if supplied(name, str(value))
+        } & set(action_config["inputs"])
+        reachable |= supplied_inputs
+
+        # An action input may reach the tool under another name, as
+        # VERBOSE does through G2G_VERBOSE, so credit the destination
+        # too. How the action consumes an input beyond that is its own
+        # business and other tests cover it.
+        for variable, sources in self._action_exports(action_config).items():
+            if sources & supplied_inputs:
+                reachable.add(variable)
+
+        return reachable
+
+    def test_no_setting_is_silently_unreachable(
+        self, reusable_workflow, action_config
+    ):
+        from github2gerrit.config import KNOWN_KEYS
+
+        unreachable = sorted(
+            KNOWN_KEYS
+            - self._reachable(reusable_workflow, action_config)
+            - _OUT_OF_REACH
+        )
+        assert not unreachable, (
+            f"{unreachable} are recognised configuration but cannot be "
+            f"supplied through the reusable workflow, so a project "
+            f"setting them gets the defaults and no warning. Add an "
+            f"input, forward the repository variable, or record why "
+            f"the setting is deliberately out of reach."
+        )
+
+    def test_the_exemptions_are_real_settings(self):
+        # An exemption for a key that no longer exists hides a genuine
+        # gap behind a stale name.
+        from github2gerrit.config import KNOWN_KEYS
+
+        assert not sorted(_OUT_OF_REACH - KNOWN_KEYS)
+
+    def test_no_exemption_is_redundant(self, reusable_workflow, action_config):
+        # An exemption for something already reachable is worse than
+        # noise: it asserts a limitation that no longer exists, and the
+        # next person to widen the list has a precedent for excusing a
+        # key without checking. Tightening the invariant retired the
+        # G2G_VERBOSE entry exactly this way.
+        redundant = sorted(
+            _OUT_OF_REACH & self._reachable(reusable_workflow, action_config)
+        )
+        assert not redundant, (
+            f"{redundant} are listed as out of reach but the workflow "
+            f"does supply them; drop the exemption rather than leaving "
+            f"a limitation recorded that no longer holds"
+        )
+
+    def test_the_trust_set_is_reachable(self, reusable_workflow, action_config):
+        # Called out on its own because its failure is the unsafe one:
+        # a project tightening the trust set would believe it had, and
+        # keep the permissive default.
+        assert "G2G_TRUSTED_ASSOCIATIONS" in self._reachable(
+            reusable_workflow, action_config
+        )
+
+    def test_a_swapped_variable_mapping_is_not_reachable(
+        self, reusable_workflow, action_config
+    ):
+        # The failure this invariant is for. Exchanging two values
+        # leaves both destination keys present and both variables
+        # referenced, so anything short of a same-name check calls the
+        # interface healthy while neither setting arrives.
+        step = self._step(reusable_workflow, "jobs", self.ACTION_STEP)
+        swapped = copy.deepcopy(reusable_workflow)
+        swapped_step = self._step(swapped, "jobs", self.ACTION_STEP)
+        swapped_step["env"]["G2G_TOPIC_PREFIX"] = step["env"]["G2G_LOG_LEVEL"]
+        swapped_step["env"]["G2G_LOG_LEVEL"] = step["env"]["G2G_TOPIC_PREFIX"]
+
+        reachable = self._reachable(swapped, action_config)
+        assert "G2G_TOPIC_PREFIX" not in reachable
+        assert "G2G_LOG_LEVEL" not in reachable
+
+    def test_an_undeclared_action_input_is_not_reachable(
+        self, reusable_workflow, action_config
+    ):
+        # The hole this invariant closed: a workflow can declare and
+        # forward an input that action.yaml has never heard of, which
+        # GitHub reports only as a warning in the log.
+        stripped = {
+            **action_config,
+            "inputs": {
+                name: spec
+                for name, spec in action_config["inputs"].items()
+                if name != "AUTOMATION_ONLY"
+            },
+        }
+        assert "AUTOMATION_ONLY" in self._reachable(
+            reusable_workflow, action_config
+        )
+        assert "AUTOMATION_ONLY" not in self._reachable(
+            reusable_workflow, stripped
+        )
+
+
 class TestReusableWorkflowForwardsItsInputs:
     """Every declared input must reach the composite action.
 
@@ -130,8 +394,6 @@ class TestReusableWorkflowForwardsItsInputs:
     """
 
     ACTION_STEP = "Run github2gerrit composite action"
-
-    _INPUT_REFERENCE = re.compile(r"inputs\.([A-Za-z_][A-Za-z0-9_]*)")
 
     @staticmethod
     def _workflow_call(reusable_workflow):
@@ -149,18 +411,24 @@ class TestReusableWorkflowForwardsItsInputs:
         )
 
     def _forwarded_names(self, reusable_workflow) -> set[str]:
-        """Return the input names the action step actually references.
+        """Return the inputs the action step passes to their own name.
 
-        Whole names, extracted by pattern, rather than a substring
-        test: `"inputs.GERRIT_SERVER" in text` is satisfied by a
-        forwarded `inputs.GERRIT_SERVER_PORT`, so dropping the shorter
-        mapping would go unnoticed. This interface has two such pairs.
+        The destination key has to match the input it references, not
+        merely be present somewhere in the block. Collecting referenced
+        names alone cannot see a swap: mapping `GERRIT_SERVER` from
+        `inputs.GERRIT_SERVER_PORT` and back again leaves both names in
+        the set while neither setting reaches its destination.
+
+        Whole identifiers, for the same reason the pattern exists:
+        `inputs.GERRIT_SERVER` is a prefix of `inputs.GERRIT_SERVER_PORT`.
         """
         step = self._action_step(reusable_workflow)
-        text = "\n".join(
-            [*step.get("with", {}).values(), *step.get("env", {}).values()]
-        )
-        return set(self._INPUT_REFERENCE.findall(text))
+        return {
+            name
+            for block in (step.get("with", {}), step.get("env", {}))
+            for name, value in block.items()
+            if name in _INPUT_REFERENCE.findall(str(value))
+        }
 
     def test_every_input_is_forwarded(self, reusable_workflow):
         declared = set(self._workflow_call(reusable_workflow)["inputs"])

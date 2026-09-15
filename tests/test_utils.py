@@ -8,6 +8,7 @@ import os
 import tempfile
 import threading
 
+import pytest
 from _pytest.logging import LogCaptureFixture
 from _pytest.monkeypatch import MonkeyPatch
 
@@ -55,11 +56,36 @@ class TestEnvBool:
             "off",
             "Off",
             "OFF",
-            "",
         ]
         for value in false_values:
             monkeypatch.setenv("TEST_VAR", value)
             assert env_bool("TEST_VAR") is False
+
+    @pytest.mark.parametrize("blank", ["", "   ", "\t", "\n"])
+    def test_env_bool_blank_counts_as_absent(
+        self, monkeypatch: MonkeyPatch, blank: str
+    ) -> None:
+        """A present but blank variable must yield the default.
+
+        ``${{ vars.SOMETHING }}`` renders as the empty string when the
+        repository variable is undefined, and the reusable workflow
+        forwards settings that way. Reading blank as ``False`` would
+        silently disable every true-by-default setting for consumers
+        who configured nothing — parameter derivation among them.
+        """
+        monkeypatch.setenv("TEST_VAR", blank)
+        assert env_bool("TEST_VAR", default=True) is True
+        assert env_bool("TEST_VAR", default=False) is False
+
+    def test_env_bool_blank_matches_unset(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        """Blank and absent must be indistinguishable to callers."""
+        for default in (True, False):
+            monkeypatch.delenv("TEST_VAR", raising=False)
+            unset = env_bool("TEST_VAR", default=default)
+            monkeypatch.setenv("TEST_VAR", "")
+            assert env_bool("TEST_VAR", default=default) is unset
 
     def test_env_bool_unset_default_false(
         self, monkeypatch: MonkeyPatch

@@ -84,11 +84,12 @@ def test_gitreview_urlopen_rejects_lookalike_origins(url: str) -> None:
 
 def test_gitreview_urlopen_accepts_expected_origin() -> None:
     """The guard still serves the origin the fetcher actually uses."""
-    opener = _gitreview_urlopen(b"[gerrit]\nhost=gerrit.example.org\n")
+    content = b"[gerrit]\nhost=gerrit.example.org\n"
+    opener = _gitreview_urlopen(content)
 
     response = opener("https://raw.githubusercontent.com/o/r/main/.gitreview")
 
-    assert b"gerrit.example.org" in response.read()
+    assert response.read() == content
 
 
 class TestChangeFingerprint:
