@@ -7,6 +7,8 @@ name: 'Test GitHub2Gerrit 🧪'
 # yamllint disable-line rule:truthy
 on:
   workflow_dispatch:
+  schedule:
+    - cron: '23 5 * * *'
   push:
     branches: ['main']
   pull_request:
@@ -24,7 +26,7 @@ on:
       - '.github/workflows/testing.yaml'
 
 concurrency:
-  group: "${{ github.workflow }}-${{ github.ref }}"
+  group: "${{ github.workflow }}-${{ github.event_name == 'schedule' && 'schedule' || github.ref }}"
   cancel-in-progress: true
 
 permissions: {}
@@ -34,17 +36,17 @@ jobs:
   # This exercises the workflow_call plumbing that the composite
   # action tests below cannot reach: the bundled-action checkout and
   # the workflow source repository resolution from the job context.
-  # Runs on every trigger event (pull_request, push and
-  # workflow_dispatch) so all supported caller invocation modes get
-  # coverage. G2G_NO_GERRIT keeps the run hermetic: no Gerrit server
-  # access takes place.
+  # Runs on every trigger event (pull_request, push, workflow_dispatch
+  # and schedule) so all supported caller invocation modes get
+  # coverage; schedule exercises the scheduled sweep. G2G_NO_GERRIT
+  # keeps the run hermetic: no Gerrit server access takes place.
   reusable-workflow-test:
     name: 'Test Reusable Workflow'
     permissions:
       contents: read  # Checkout for the mirror job and bundled action
       pull-requests: write  # Comment on and update mirrored PRs
       issues: write  # Post status/back-reference comments on issues
-    uses: ./.github/workflows/github2gerrit.yaml
+    uses: $/.github/workflows/github2gerrit.yaml
     with:
       G2G_NO_GERRIT: true
       AUTOMATION_ONLY: false
@@ -68,7 +70,7 @@ jobs:
           persist-credentials: false
 
       - name: "Running local action: ${{ github.repository }}"
-        uses: ./
+        uses: $/
         with:
           GERRIT_KNOWN_HOSTS: 'dummy-host ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC...'
           GERRIT_SSH_PRIVKEY_G2G: 'dummy-key'
@@ -77,7 +79,7 @@ jobs:
 
       # yamllint disable-line rule:line-length
       - name: "Running local action: ${{ github.repository }} [Failure]"
-        uses: ./
+        uses: $/
         id: failure
         continue-on-error: true
         env:

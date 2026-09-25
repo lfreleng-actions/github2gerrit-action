@@ -2,18 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
-# Path-specific configurations.
 paths:
   .github/workflows/github2gerrit.yaml:
     ignore:
-      # actionlint's context schemas do not yet include the documented
-      # properties that identify the reusable workflow's own repository
-      # and commit: job.workflow_repository/job.workflow_sha and the
-      # legacy github.job_workflow_ref/job_workflow_sha (GHES fallback)
       - 'property "job_workflow_(ref|sha)" is not defined in object type .+'
-      - 'property "workflow_(repository|sha)" is not defined in object type .+'
+  .github/workflows/openssf-scorecard.yaml:
+    ignore:
+      # yamllint disable-line rule:line-length
+      - 'reusable workflow call "lfit/releng-reusable-workflows/\.github/workflows/reuse-openssf-scorecard\.yaml@[0-9a-f]{40}" has no explicit cache access limit'
   .github/workflows/testing.yaml:
     ignore:
-      # Ignore deliberate test failure
       - 'input "invalid_input" is not defined in action .+'
       - 'missing input "input" which is required by action .+'
+      - 'specifying action "\$/" in invalid format because path is missing'

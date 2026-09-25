@@ -4,19 +4,26 @@
 
 ci:
   autofix_prs: false
-  # pre-commit.ci sandbox prevents network calls; aislop runs engines
-  # that can call the network at scan time, so it cannot run there
-  # either. gha-workflow-linter validates action calls over the
-  # network; pytest runs the full suite.
-  skip: [pytest, gha-workflow-linter, aislop]
+  skip:
+    - pytest
+    - gha-workflow-linter
+    - aislop
+    - eslint
+    - go-fmt
+    - go-vet
+    - go-mod-tidy
+    - golangci-lint
   autofix_commit_msg: |
-    Chore: pre-commit autofixes
+    Chore: Pre-commit autofixes
 
     Signed-off-by: pre-commit-ci[bot] <pre-commit-ci@users.noreply.github.com>
   autoupdate_commit_msg: |
-    Chore: pre-commit autoupdate
+    Chore: Pre-commit autoupdate
 
     Signed-off-by: pre-commit-ci[bot] <pre-commit-ci@users.noreply.github.com>
+
+default_install_hook_types: [pre-commit, commit-msg]
+default_stages: [pre-commit]
 
 exclude: |
   (?x)^(docs/conf.py|
@@ -29,6 +36,14 @@ exclude: |
         \.venv/)
 
 repos:
+  - repo: local
+    hooks:
+      - id: frozen-rev-is-a-release
+        name: frozen revs name a release
+        language: pygrep
+        entry: '#\s*frozen:\s+(?!v?[0-9]+(\.[0-9]+)*(-[0-9]+)?\s*$|\s)'
+        files: '^\.pre-commit-config\.yaml$'
+
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c  # frozen: v6.0.0
     hooks:
@@ -52,8 +67,14 @@ repos:
           - --branch=rc
           - --branch=production
 
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: 2ca41cc1372d1e939a6a879f18cdc19fc1cac1ce  # frozen: v8.30.0
+    hooks:
+      - id: gitleaks
+        always_run: true
+
   - repo: https://github.com/jorisroovers/gitlint
-    rev: acc9d9de6369b76d22cb4167029d2035e8730b98 # frozen: v0.19.1
+    rev: acc9d9de6369b76d22cb4167029d2035e8730b98  # frozen: v0.19.1
     hooks:
       - id: gitlint
 
@@ -75,15 +96,6 @@ repos:
   - repo: local
     hooks:
       - id: sync-mypy-pins
-        # Rewrites the mypy hook's exact pins below to the versions
-        # uv.lock records, so the two cannot drift. Ordered ahead of the
-        # mypy hook so the pins are corrected before mypy is reached,
-        # though pre-commit reads this file and builds hook environments
-        # before any hook runs: a rewrite fails this run, as any
-        # modifying hook does, and the corrected pins take effect on the
-        # rerun. Both files come from the same checkout, so the verdict
-        # is the same locally and in CI, and a Dependabot lockfile bump
-        # fails here on its own pull request rather than on main.
         name: sync mypy hook pins with uv.lock
         entry: python3 scripts/sync_mypy_pins.py
         language: system
@@ -94,58 +106,7 @@ repos:
     rev: 7ff8d35ae36a7d2b968f2f90b4c723e292e594ee  # frozen: v2.3.1
     hooks:
       - id: mypy
-        # Every Python path in the repository, matching the ruff and
-        # basedpyright hooks above and below so the three cannot drift.
         files: ^(src|scripts|tests)/.+\.py$|^sitecustomize\.py$
-        # mypy runs in an isolated virtualenv that holds only what is
-        # listed here, so anything the checked files import has to be
-        # present or mypy draws conclusions the project never would. With
-        # pytest absent, for instance, @pytest.fixture reads as an untyped
-        # decorator and pytest.raises stops telling mypy the block can
-        # swallow the exception, which turns every statement after a
-        # `with pytest.raises(...)` into dead code. Installing the real
-        # packages removes that whole class of environment-only findings;
-        # keep this list in step with the imports under src/ and tests/.
-        # pygerrit2 is deliberately absent: it is an optional runtime
-        # dependency and pyproject.toml already gives it
-        # ignore_missing_imports.
-        #
-        # The pins below are exact (==) rather than floors. This
-        # environment is resolved from PyPI at install time, not from
-        # uv.lock, so a >= constraint would still pick up whatever is
-        # newest whenever pre-commit.ci happens to rebuild the
-        # environment, and the hook would then report on a dependency set
-        # nobody runs locally. That drift is not theoretical: CI once
-        # resolved typer 0.27.2 against a lockfile holding 0.27.1, and the
-        # two disagreed about which module typer.Exit lives in.
-        # The versions are not maintained by hand: the sync-mypy-pins hook
-        # above rewrites them from uv.lock, so after `uv lock --upgrade` a
-        # `prek run sync-mypy-pins --all-files` brings them into step
-        # (--all-files, because neither file is staged at that point and
-        # the hook would otherwise not be selected). The tests in
-        # tests/test_precommit_mypy_pins.py check the list is exact and
-        # complete against the imports; they deliberately do not compare
-        # versions to the lockfile, since a pull request is tested as
-        # merged into main and would otherwise fail for a dependency that
-        # moved there, not for anything on the branch.
-        #
-        # These pins do not freeze the whole resolved closure: pip still
-        # picks transitive versions at build time, and listing every
-        # package uv.lock records would duplicate the lockfile here. They
-        # do not need to. mypy's verdict can only turn on a package whose
-        # types it reads, which means one the checked files import, so the
-        # list covers exactly that set -- rich is here because src/ imports
-        # it, not because typer happens to pull it in. The same test asserts
-        # the list stays complete against those imports.
-        #
-        # mypy itself is pinned here as well as coming from the mirror's
-        # rev above. That is not redundant: the rev decides which mypy
-        # runs, and nothing otherwise ties it to the locked one, so an
-        # autoupdate of the mirror or a lockfile-only mypy upgrade would
-        # leave the hook running a different checker in silence. With the
-        # pin present, the sync hook keeps it at the locked version, and a
-        # mirror whose rev disagrees fails to install rather than quietly
-        # winning.
         additional_dependencies:
           - mypy==2.3.1
           - click==8.5.0
@@ -157,7 +118,7 @@ repos:
           - types-requests==2.33.0.20260906
 
   - repo: https://github.com/btford/write-good
-    rev: ab66ce10136dfad5146e69e70f82a3efac8842c1 # frozen: v1.0.8
+    rev: ab66ce10136dfad5146e69e70f82a3efac8842c1  # frozen: v1.0.8
     hooks:
       - id: write-good
         files: "\\.(rst|md|markdown|mdown|mkdn)$"
@@ -180,26 +141,20 @@ repos:
     hooks:
       - id: reuse
 
-  # Replaces: https://github.com/rhysd/actionlint
-  # Permits actionlint to run both locally and with precommit.ci/GitHub
-  - repo: https://github.com/Mateusz-Grzelinski/actionlint-py
-    rev: c04ed26e40637cab1aa9879c693832a9c120fb20  # frozen: v1.7.12.24
+  - repo: https://github.com/kjanat/actionlint
+    rev: 08bb2c4f0d039744455b87aef1c647fb8b66d37b  # frozen: v1.17.0
     hooks:
-      - id: actionlint
+      - id: actionlint-shellcheck
 
-  # Check for misspellings in documentation files
   - repo: https://github.com/codespell-project/codespell
     rev: 57b21406f092110c18776e39b0bda50d37c945c8  # frozen: v2.4.3
     hooks:
       - id: codespell
 
-  # Requires a mirror, primary repo lacks .pre-commit-hooks.yaml
   - repo: https://github.com/DetachHead/basedpyright-prek-mirror
     rev: 706e6acebe9e88c2c28d1527d3085a14b11794c4  # frozen: 1.40.1
     hooks:
       - id: basedpyright
-        # Every Python path in the repository. Keep in sync with the
-        # `include` list under [tool.pyright] in pyproject.toml.
         files: ^(src|scripts|tests)/.+\.py$|^sitecustomize\.py$
 
   - repo: https://github.com/lfreleng-actions/gha-workflow-linter
@@ -207,12 +162,6 @@ repos:
     hooks:
       - id: gha-workflow-linter
 
-  # Catch AI slop developer-side before it reaches a pull request.
-  # Runs the full-repository quality gate, scored against
-  # .aislop/config.yml. A local hook installing the published npm
-  # package: the scanaislop/aislop git repository does not ship the
-  # built dist/, so its bundled pre-commit hook cannot install. Bump
-  # the pinned version here manually when new aislop releases ship.
   - repo: local
     hooks:
       - id: aislop
@@ -222,6 +171,47 @@ repos:
         additional_dependencies: ["aislop@0.14.1"]
         pass_filenames: false
         always_run: true
+
+  - repo: local
+    hooks:
+      - id: eslint
+        name: eslint
+        # yamllint disable-line rule:line-length
+        entry: bash -c 'export GUARD_EXCLUDE="(^|/)(dist|build|coverage|node_modules)/|(^|/)eslint[.]config[.](m|c)?js$"; sh .github/hooks/manifest-guard.sh package.json "*.js" "*.jsx" "*.mjs" "*.cjs" "*.ts" "*.tsx" "*.mts" "*.cts"; rc=$?; case "$rc" in 3|4) ;; *) exit "$rc";; esac; v=$(npx --no-install eslint --version 2>/dev/null | sed "s/^v//; s/[.].*$//"); if [ -z "$v" ]; then echo "eslint not installed - add eslint >=9 to devDependencies" >&2; exit 1; fi; if [ "$v" -lt 9 ]; then echo "eslint $v cannot load a flat config reliably - upgrade to >=9" >&2; exit 1; fi; if ! git ls-files -- eslint.config.mjs | grep -q .; then echo "eslint.config.mjs is not tracked - copy it from actions-template, or ESLint would lint against a config outside this repository" >&2; exit 1; fi; { sh .github/hooks/manifest-guard.sh --list package.json "*.js" "*.jsx" "*.mjs" "*.cjs" "*.ts" "*.tsx" "*.mts" "*.cts"; printf 'eslint.config.mjs\0'; } | xargs -0 env ESLINT_USE_FLAT_CONFIG=true npx --no-install eslint --no-config-lookup --config eslint.config.mjs --fix'
+        language: system
+        always_run: true
+        pass_filenames: false
+
+  - repo: local
+    hooks:
+      - id: go-fmt
+        name: go format (gofmt + goimports)
+        # yamllint disable-line rule:line-length
+        entry: bash -c 'sh .github/hooks/manifest-guard.sh go.mod "*.go"; rc=$?; case "$rc" in 3) ;; 4) exit 0;; *) exit "$rc";; esac; command -v golangci-lint >/dev/null 2>&1 || { echo "golangci-lint not installed - see https://golangci-lint.run/welcome/install/" >&2; exit 1; }; sh .github/hooks/manifest-guard.sh --list go.mod "*.go" | xargs -0 golangci-lint fmt'
+        language: system
+        always_run: true
+        pass_filenames: false
+      - id: go-mod-tidy
+        name: go mod tidy
+        # yamllint disable-line rule:line-length
+        entry: bash -c 'sh .github/hooks/manifest-guard.sh go.mod "*.go"; rc=$?; case "$rc" in 3|4) ;; *) exit "$rc";; esac; go mod tidy'
+        language: system
+        always_run: true
+        pass_filenames: false
+      - id: go-vet
+        name: go vet
+        # yamllint disable-line rule:line-length
+        entry: bash -c 'sh .github/hooks/manifest-guard.sh go.mod "*.go"; rc=$?; case "$rc" in 3) ;; 4) exit 0;; *) exit "$rc";; esac; go vet ./...'
+        language: system
+        always_run: true
+        pass_filenames: false
+      - id: golangci-lint
+        name: golangci-lint
+        # yamllint disable-line rule:line-length
+        entry: bash -c 'sh .github/hooks/manifest-guard.sh go.mod "*.go"; rc=$?; case "$rc" in 3) ;; 4) exit 0;; *) exit "$rc";; esac; command -v golangci-lint >/dev/null 2>&1 || { echo "golangci-lint not installed - see https://golangci-lint.run/welcome/install/" >&2; exit 1; }; golangci-lint run --timeout=5m'
+        language: system
+        always_run: true
+        pass_filenames: false
 
   - repo: https://github.com/python-jsonschema/check-jsonschema
     rev: c4654a7e007c9619a5eb63c39a456572a0fa1851  # frozen: 0.38.0
@@ -238,7 +228,6 @@ repos:
           - yaml
       - id: check-readthedocs
 
-  # Run tests last to ensure all code changes from other hooks are tested
   - repo: local
     hooks:
       - id: pytest
