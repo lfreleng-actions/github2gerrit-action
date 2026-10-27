@@ -446,9 +446,11 @@ design.
   account, and rejects one whose author it cannot read.
 - Set `SKIP_FORKS: true` on a repository that takes no outside
   contributions through GitHub. It refuses every pull request whose
-  head is not in the repository, whatever its reviews say, and with the
-  reusable workflow the job does not start for one, so the key never
-  reaches a runner on a fork's account. See
+  head is not in the repository, whatever its reviews say, before any
+  fetch and before it unlocks the Gerrit key. With the reusable
+  workflow, a `pull_request_target` event showing a fork head starts
+  no job at all; a comment re-check, a dispatch naming the pull
+  request, or a sweep still runs and the tool refuses there. See
   [refusing fork pull requests](docs/features.md#refusing-fork-pull-requests).
 - SSH handling is non-invasive: the tool creates temporary SSH files
   in the workspace without modifying user SSH configuration or keys,

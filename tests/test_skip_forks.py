@@ -14,6 +14,8 @@ workflow's job condition.
 from __future__ import annotations
 
 import copy
+import os
+from collections.abc import Iterator
 from typing import Any
 from unittest.mock import MagicMock
 from unittest.mock import patch
@@ -25,6 +27,8 @@ from workflow_harness import load_jobs
 from workflow_harness import truthy as _truthy
 
 from github2gerrit.cli import _check_fork_approval
+from github2gerrit.cli import _export_bool_if_explicit
+from github2gerrit.config import apply_config_to_env
 from github2gerrit.models import GitHubContext
 from github2gerrit.pr_approval import APPROVAL_MARKER
 from github2gerrit.pr_approval import render_forks_skipped_comment
@@ -164,6 +168,81 @@ class TestTheDefaultIsOff:
         ):
             assert _check_fork_approval(_pr(), _ctx()) == (True, HEAD_SHA)
         approval.assert_called_once()
+
+
+def _ctx_with_source(source_name: str) -> Any:
+    """A typer context whose one parameter came from *source_name*."""
+    source = MagicMock()
+    source.name = source_name
+    ctx = MagicMock()
+    ctx.get_parameter_source.return_value = source
+    return ctx
+
+
+class TestAConfigurationFileCanStateThePolicy:
+    """A direct CLI run honours SKIP_FORKS from the per-org config.
+
+    The configuration file is applied to the environment after the
+    options are read, for keys not already set. Exporting the option's
+    default beforehand would therefore shadow the file, and a fork
+    would pass on a run that supplied neither the flag nor the
+    variable.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean(self, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+        # The tests below write to os.environ directly, through the
+        # helpers under test. delenv on an absent name records no undo,
+        # so the variable is removed again explicitly on the way out.
+        monkeypatch.delenv("SKIP_FORKS", raising=False)
+        yield
+        os.environ.pop("SKIP_FORKS", None)
+
+    def test_the_default_is_not_exported(self) -> None:
+        _export_bool_if_explicit(
+            _ctx_with_source("DEFAULT"), "skip_forks", "SKIP_FORKS", False
+        )
+        assert "SKIP_FORKS" not in os.environ
+
+    def test_an_explicit_flag_is_exported(self) -> None:
+        _export_bool_if_explicit(
+            _ctx_with_source("COMMANDLINE"), "skip_forks", "SKIP_FORKS", True
+        )
+        assert os.environ["SKIP_FORKS"] == "true"
+
+    def test_an_explicit_flag_outranks_the_file(self) -> None:
+        _export_bool_if_explicit(
+            _ctx_with_source("COMMANDLINE"), "skip_forks", "SKIP_FORKS", False
+        )
+        apply_config_to_env({"SKIP_FORKS": "true"})
+        assert os.environ["SKIP_FORKS"] == "false"
+
+    def test_a_variable_already_set_is_left_alone(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # GitHub Actions passes the action input as the variable; the
+        # consumer parses that string itself.
+        monkeypatch.setenv("SKIP_FORKS", "false")
+        _export_bool_if_explicit(
+            _ctx_with_source("ENVIRONMENT"), "skip_forks", "SKIP_FORKS", False
+        )
+        assert os.environ["SKIP_FORKS"] == "false"
+
+    def test_the_file_alone_refuses_a_fork(self) -> None:
+        _export_bool_if_explicit(
+            _ctx_with_source("DEFAULT"), "skip_forks", "SKIP_FORKS", False
+        )
+        apply_config_to_env({"SKIP_FORKS": "true"})
+        with (
+            patch("github2gerrit.cli._post_forks_skipped_notice"),
+            patch("github2gerrit.cli.evaluate_fork_approval") as approval,
+            patch(
+                "github2gerrit.cli._is_github_actions_context",
+                return_value=False,
+            ),
+        ):
+            assert _check_fork_approval(_pr(), _ctx()) == (False, "")
+        approval.assert_not_called()
 
 
 # ---------------------------------------------------------------------

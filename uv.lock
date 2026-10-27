@@ -441,6 +441,10 @@ dev = [
 ]
 
 [package.dev-dependencies]
+build = [
+    { name = "hatch-vcs" },
+    { name = "hatchling" },
+]
 dev = [
     { name = "github2gerrit", extra = ["dev"] },
     { name = "hatch-vcs" },
@@ -476,6 +480,10 @@ requires-dist = [
 provides-extras = ["dev"]
 
 [package.metadata.requires-dev]
+build = [
+    { name = "hatch-vcs", specifier = ">=0.5.0" },
+    { name = "hatchling", specifier = ">=1.28.0" },
+]
 dev = [
     { name = "github2gerrit", extras = ["dev"] },
     { name = "hatch-vcs", specifier = ">=0.5.0" },

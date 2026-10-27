@@ -894,15 +894,101 @@ class TestActionStepValidation:
 
         assert python_step is not None
         assert python_step["uses"].startswith("actions/setup-python@")
+        assert python_step["id"] == "setup-python"
 
+        # A fixed minor: the install accepts only wheels the lockfile
+        # names, so the interpreter cannot be whatever the runner has
+        # newest. The wheel-coverage test below holds the pin to the
+        # lockfile.
         with_config = python_step.get("with", {})
-        assert "python-version-file" in with_config
-        assert (
-            with_config["python-version-file"]
-            == "${{ github.action_path }}/pyproject.toml"
-        )
+        assert re.fullmatch(r"3\.\d+", str(with_config["python-version"]))
+        assert "python-version-file" not in with_config
         # No pip caching since we use uv for dependency management
         assert "cache" not in with_config
+
+    def test_every_locked_dependency_has_a_wheel_for_the_pinned_python(
+        self, action_config
+    ):
+        """The Python pin and the lockfile agree.
+
+        The first sync pass refuses to build from source, so a runtime
+        or build dependency without a Linux wheel for the pinned minor
+        fails every run. Checked here, for both runner architectures,
+        so moving the pin or updating the lockfile shows the
+        consequence before a caller does. Source-only distributions
+        are excluded: the second pass builds those deliberately.
+        """
+        import tomllib
+
+        from packaging.tags import compatible_tags
+        from packaging.tags import cpython_tags
+        from packaging.utils import parse_wheel_filename
+
+        root = Path(__file__).parent.parent
+        lock = tomllib.loads((root / "uv.lock").read_text())
+        packages = {p["name"]: p for p in lock["package"]}
+
+        # The runtime closure plus the build group, as the install
+        # step syncs them.
+        project = packages["github2gerrit"]
+        pending = [d["name"] for d in project.get("dependencies", [])]
+        pending += [
+            d["name"]
+            for d in project.get("dev-dependencies", {}).get("build", [])
+        ]
+        closure: set[str] = set()
+        while pending:
+            name = pending.pop()
+            if name in closure:
+                continue
+            closure.add(name)
+            package = packages[name]
+            pending += [d["name"] for d in package.get("dependencies", [])]
+            for extra in package.get("optional-dependencies", {}).values():
+                pending += [d["name"] for d in extra]
+
+        python_step = next(
+            step
+            for step in action_config["runs"]["steps"]
+            if step.get("name") == "Setup Python"
+        )
+        major, minor = (
+            int(part)
+            for part in python_step["with"]["python-version"].split(".")
+        )
+        platforms = {
+            "x86_64": [
+                "manylinux_2_28_x86_64",
+                "manylinux_2_17_x86_64",
+                "manylinux2014_x86_64",
+                "musllinux_1_2_x86_64",
+            ],
+            "aarch64": [
+                "manylinux_2_28_aarch64",
+                "manylinux_2_17_aarch64",
+                "manylinux2014_aarch64",
+                "musllinux_1_2_aarch64",
+            ],
+        }
+        for arch, plats in platforms.items():
+            tags = set(cpython_tags((major, minor), platforms=plats))
+            tags |= set(compatible_tags((major, minor), platforms=plats))
+            missing = sorted(
+                name
+                for name in closure
+                if packages[name].get("source", {}).get("registry")
+                and packages[name].get("wheels")
+                and not any(
+                    parse_wheel_filename(w["url"].rsplit("/", 1)[1])[3] & tags
+                    for w in packages[name]["wheels"]
+                )
+            )
+            assert not missing, (
+                f"no Linux {arch} wheel for Python {major}.{minor} in "
+                f"uv.lock for {missing}; the install step refuses to "
+                f"build from source, so update the lockfile or move the "
+                f"python-version pin in action.yaml"
+            )
 
     def test_uv_setup_step(self, action_config):
         """Test uv setup step configuration."""
@@ -1000,31 +1086,121 @@ class TestActionStepValidation:
 
         script = install_step["run"]
         assert "uv --version" in script
-        assert 'uv tool install --from "${GITHUB_ACTION_PATH}"' in script
-        # Every version, build-time ones included, comes from the
-        # lockfile at this commit.
-        assert 'uv export --directory "${GITHUB_ACTION_PATH}" --frozen' in (
-            script
-        )
-        assert "--all-groups" in script
-        assert '--constraints "${constraints}"' in script
-        assert '--build-constraints "${constraints}"' in script
-        # No route back to the PyPI release, whatever the caller sets.
+        # The install runs from a directory made fresh per invocation
+        # under runner.temp: the reusable workflow places this action
+        # beneath the caller's repository on push events, where a uv
+        # workspace of the caller's could claim it and have its own
+        # lockfile govern the install; and a merging copy into a fixed
+        # path would leave files of an earlier invocation behind.
+        assert (
+            'base="$(mktemp -d "${RUNNER_TEMP}/github2gerrit.XXXXXX")"'
+        ) in script
+        assert 'src="${base}/src"' in script
+        assert 'cp -R "${GITHUB_ACTION_PATH}/." "${src}/"' in script
+        assert '--directory "${GITHUB_ACTION_PATH}"' not in script
+        # Every dependency, build backend included, comes from the
+        # lockfile at this commit, hash-verified and wheels only on the
+        # first pass; the project itself is then built offline with
+        # that backend, so nothing is fetched that the lockfile does
+        # not name.
+        assert 'uv sync --directory "${src}" --frozen --no-build' in script
+        assert "--no-dev --group build --no-install-project" in script
+        assert 'uv pip install --directory "${src}"' in script
+        assert "--offline --no-deps --no-build-isolation ." in script
+        # No route back to the PyPI release, whatever the caller sets,
+        # and no version-only pins that would accept a new artefact.
         assert "uvx" not in script
-        assert "uv pip install" not in script
+        assert "uv tool" not in script
+        assert "--no-hashes" not in script
         assert "USE_LOCAL_ACTION" not in script
         assert "USE_LOCAL_ACTION" not in install_step.get("env", {})
 
-        # The install lands in a directory of this job's own rather
-        # than the runner's home, which persists on self-hosted
-        # runners.
+        # The environment and the uv cache live in that same fresh
+        # directory, so a persisted cache or install on a self-hosted
+        # runner cannot reach this job.
         env = install_step["env"]
-        assert env["UV_TOOL_DIR"].startswith("${{ runner.temp }}/")
-        assert env["UV_TOOL_BIN_DIR"].startswith(env["UV_TOOL_DIR"])
+        assert "UV_PROJECT_ENVIRONMENT" not in env
+        assert "UV_CACHE_DIR" not in env
+        assert 'export UV_PROJECT_ENVIRONMENT="${base}/venv"' in script
+        assert 'export UV_CACHE_DIR="${base}/uv-cache"' in script
+        assert 'echo "bin_dir=${UV_PROJECT_ENVIRONMENT}/bin"' in script
         assert (
-            'echo "github2gerrit=${UV_TOOL_BIN_DIR}/github2gerrit" '
-            '>> "$GITHUB_OUTPUT"'
+            'echo "github2gerrit=${UV_PROJECT_ENVIRONMENT}/bin/github2gerrit"'
         ) in script
+
+        # The tool shells out to `git review`. The locked git-review
+        # has to be the one git finds, not whatever a runner carries
+        # globally, so its presence beside the tool is checked for.
+        assert 'test -x "${UV_PROJECT_ENVIRONMENT}/bin/git-review"' in script
+
+    def test_source_only_distributions_build_without_isolation(
+        self, action_config
+    ):
+        """Every sdist-only dependency is named, and nothing else is.
+
+        uv builds a source distribution in an isolated environment whose
+        build requirements it resolves from the index, outside the
+        lockfile. The install step therefore builds each such package
+        without isolation, against build requirements the lockfile put
+        in place first; it needs the list to be exact. A dependency
+        update that adds a source-only distribution fails here, which
+        is the moment to check its build requirements are locked too.
+        """
+        import tomllib
+
+        root = Path(__file__).parent.parent
+        lock = tomllib.loads((root / "uv.lock").read_text())
+        sdist_only = {
+            package["name"]
+            for package in lock["package"]
+            if package.get("source", {}).get("registry")
+            and not package.get("wheels")
+        }
+
+        install_step = next(
+            step
+            for step in action_config["runs"]["steps"]
+            if "Setup github2gerrit" in step.get("name", "")
+        )
+        listed = set(install_step["env"]["SDIST_ONLY"].split())
+        assert listed == sdist_only, (
+            f"SDIST_ONLY in action.yaml lists {sorted(listed)} but the "
+            f"lockfile's source-only distributions are {sorted(sdist_only)}"
+        )
+
+        script = install_step["run"]
+        assert "--no-install-package" in script
+        assert "--no-build-isolation-package" in script
+        # Two passes: the build requirements land hash-verified first,
+        # then the source-only packages build against them.
+        assert script.count("uv sync --directory") == 2
+
+    def test_the_build_group_matches_the_build_system(self):
+        """The lockfile group the install step relies on is complete.
+
+        The package is built without isolation from what `--group build`
+        installed, so every build requirement has to be in that group
+        or the build fails on the runner with nothing to fetch.
+        """
+        import tomllib
+
+        pyproject = tomllib.loads(
+            (Path(__file__).parent.parent / "pyproject.toml").read_text()
+        )
+        requires = {
+            re.split(r"[<>=!~\[ ]", spec, maxsplit=1)[0].lower()
+            for spec in pyproject["build-system"]["requires"]
+        }
+        build_group = {
+            re.split(r"[<>=!~\[ ]", spec, maxsplit=1)[0].lower()
+            for spec in pyproject["dependency-groups"]["build"]
+            if isinstance(spec, str)
+        }
+        assert requires <= build_group, sorted(requires - build_group)
+        # Developers get the same backend through the dev group.
+        assert {"include-group": "build"} in (
+            pyproject["dependency-groups"]["dev"]
+        )
 
     def test_cli_execution_step(self, action_config):
         """Test CLI execution step configuration."""
@@ -1051,7 +1227,12 @@ class TestActionStepValidation:
         assert env_config["GITHUB2GERRIT"] == (
             "${{ steps.setup-g2g.outputs.github2gerrit }}"
         )
+        assert env_config["G2G_BIN_DIR"] == (
+            "${{ steps.setup-g2g.outputs.bin_dir }}"
+        )
         script = cli_step["run"]
+        # First on PATH, so `git review` resolves to the locked copy.
+        assert 'export PATH="${G2G_BIN_DIR}:${PATH}"' in script
         assert '"${GITHUB2GERRIT}"' in script
         assert "uvx" not in script
         assert "python -m" not in script

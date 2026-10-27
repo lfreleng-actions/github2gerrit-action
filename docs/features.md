@@ -685,8 +685,8 @@ would edit, so a later event updates it rather than adding another.
 
 With the reusable workflow the job itself does not start for a
 `pull_request_target` event whose payload shows a fork head, or no head
-repository at all (a deleted fork), so the Gerrit key never reaches a runner
-on such a pull request's account. Routes whose payload names no head
+repository at all (a deleted fork), so for those events the Gerrit key never
+reaches a runner. Routes whose payload names no head
 repository — a comment re-check, a dispatch naming the pull request, a
 scheduled sweep — still run, and the tool applies the same refusal there.
 

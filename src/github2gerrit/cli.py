@@ -1303,6 +1303,23 @@ def _apply_bool_env_overrides(
         os.environ[env_var] = "true" if resolved else "false"
 
 
+def _export_bool_if_explicit(
+    ctx: typer.Context, param_name: str, env_var: str, current: bool
+) -> None:
+    """Export a boolean option only when the command line set it.
+
+    Unlike :func:`_apply_bool_env_overrides`, this leaves the variable
+    alone when the option is at its default: the per-organisation
+    configuration file is applied to the environment later, for keys
+    not already set, and exporting the default here would shadow a
+    policy that file states. An environment value already present is
+    left as it is, since the consumer parses it directly.
+    """
+    source = ctx.get_parameter_source(param_name)  # pyright: ignore[reportAttributeAccessIssue]
+    if source is not None and source.name == "COMMANDLINE":
+        os.environ[env_var] = "true" if current else "false"
+
+
 def _apply_netrc_options(
     no_netrc: bool,
     netrc_file: Path | None,
@@ -1908,9 +1925,11 @@ def main(
             "log_reconcile_json": (log_reconcile_json, "LOG_RECONCILE_JSON"),
             "create_missing": (create_missing, "CREATE_MISSING"),
             "automation_only": (automation_only, "AUTOMATION_ONLY"),
-            "skip_forks": (skip_forks, "SKIP_FORKS"),
         },
     )
+    # SKIP_FORKS is a policy a per-organisation configuration file may
+    # state, so its default is not exported; see _export_bool_if_explicit.
+    _export_bool_if_explicit(ctx, "skip_forks", "SKIP_FORKS", skip_forks)
 
     _apply_netrc_options(no_netrc, netrc_file, netrc_optional, gerrit_server)
     _configure_logging_and_progress(verbose, show_progress)
