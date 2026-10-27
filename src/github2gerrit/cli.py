@@ -87,6 +87,7 @@ from .pr_approval import evaluate_fork_approval
 from .pr_approval import recorded_transfer
 from .pr_approval import render_blocked_comment
 from .pr_approval import render_cleared_comment
+from .pr_approval import render_forks_skipped_comment
 from .pr_approval import render_transferred_comment
 from .pr_commands import CMD_CHECK
 from .pr_commands import MENTION_PREFIX
@@ -613,7 +614,8 @@ def _check_fork_approval(
     already implies write access. Everything else — forks, and pull
     requests whose provenance could not be established — requires an
     approving review from a trusted maintainer, bound to the current
-    head commit.
+    head commit; or, when ``SKIP_FORKS`` is set, is turned away
+    outright, with nothing a review can do about it.
 
     Only a head positively known to live in the base repository skips
     the gate. Unknown provenance does not: `is_fork_pr` answers a
@@ -622,9 +624,10 @@ def _check_fork_approval(
     ``False`` in the same case. Using the latter keeps the gate closed
     when metadata is missing, which is exactly when it matters most.
 
-    The gate applies to unattended runs only. A direct CLI invocation
-    is a person acting deliberately with their own credentials, and
-    needs no second signature.
+    The approval gate applies to unattended runs only. A direct CLI
+    invocation is a person acting deliberately with their own
+    credentials, and needs no second signature. ``SKIP_FORKS`` is a
+    policy the operator stated, and applies wherever it is set.
 
     Runs before any fork content is fetched and before the Gerrit key
     is materialised, so a blocked pull request never reaches either.
@@ -637,10 +640,26 @@ def _check_fork_approval(
         worker clear or overwrite another's constraint.
 
         Blocking is not an error: the pull request is simply waiting
-        for a human, and a failed check would misrepresent that.
+        for a human, or is one this repository does not take, and a
+        failed check would misrepresent either.
     """
     if gh.head_is_trusted:
         return True, ""
+
+    if env_bool("SKIP_FORKS", False):
+        log.warning(
+            "🛑 Pull request #%s not transferred to Gerrit: SKIP_FORKS is "
+            "enabled and the head is not in this repository",
+            gh.pr_number,
+        )
+        safe_console_print(
+            "🛑 Fork pull requests are not transferred (SKIP_FORKS)",
+            style="yellow",
+            progress_tracker=progress_tracker,
+        )
+        if pr_obj is not None:
+            _post_forks_skipped_notice(pr_obj)
+        return False, ""
 
     if not _is_github_actions_context():
         # Direct CLI invocation. The operator chose this pull request
@@ -873,6 +892,26 @@ def _post_fork_approval_notice(
         create_pr_comment(pr_obj, body)
     except Exception as exc:
         log.debug("Could not post fork approval notice: %s", exc)
+
+
+def _post_forks_skipped_notice(pr_obj: Any) -> None:
+    """Tell the contributor the repository takes no fork pull requests.
+
+    Edits any prior notice rather than adding one per event, and is
+    best-effort for the same reason as the approval notice: a comment
+    API failure must not turn a refusal into a crash or a pass.
+    """
+    if env_bool("CI_TESTING", False):
+        return
+
+    body = render_forks_skipped_comment()
+    if _edit_owned_marker_comment(pr_obj, body):
+        return
+
+    try:
+        create_pr_comment(pr_obj, body)
+    except Exception as exc:
+        log.debug("Could not post SKIP_FORKS notice: %s", exc)
 
 
 def _extract_and_display_pr_info(
@@ -1798,6 +1837,15 @@ def main(
         envvar="AUTOMATION_ONLY",
         help="Accept pull requests from known automation tools.",
     ),
+    skip_forks: bool = typer.Option(
+        False,
+        "--skip-forks/--no-skip-forks",
+        envvar="SKIP_FORKS",
+        help=(
+            "Never transfer a pull request whose head is not in this "
+            "repository, whatever its reviews say."
+        ),
+    ),
     no_netrc: bool = typer.Option(
         False,
         "--no-netrc",
@@ -1860,6 +1908,7 @@ def main(
             "log_reconcile_json": (log_reconcile_json, "LOG_RECONCILE_JSON"),
             "create_missing": (create_missing, "CREATE_MISSING"),
             "automation_only": (automation_only, "AUTOMATION_ONLY"),
+            "skip_forks": (skip_forks, "SKIP_FORKS"),
         },
     )
 

@@ -97,6 +97,14 @@ on:
         required: false
         default: true
         type: boolean
+      SKIP_FORKS:
+        description: >-
+          Never transfer a pull request whose head is not in this
+          repository, whatever its reviews say. For repositories that
+          take no outside contributions through GitHub.
+        required: false
+        default: false
+        type: boolean
       NORMALISE_COMMIT:
         description: "Normalize commit messages to conventional commit format"
         required: false
@@ -317,7 +325,14 @@ jobs:
     #
     # pull_request_target on a fork head is deliberately kept: it runs
     # from the default branch, holds the credentials, and is the
-    # trigger that applies the approval gate.
+    # trigger that applies the approval gate. Unless SKIP_FORKS is set:
+    # a repository that takes no fork pull requests has no gate to
+    # apply, so the job does not start and the credentials never reach
+    # a runner for one. A deleted fork reports no head repository and
+    # is excluded the same way, as the tool would treat it. Routes
+    # whose payload names no head repository (issue_comment, dispatch,
+    # schedule) still run and the tool applies the same policy, with a
+    # notice on the pull request.
     #
     # A bulk workflow_dispatch (PR_NUMBER of 0 or unset) does not run
     # here. One job covering every pull request cannot share a lock
@@ -353,7 +368,7 @@ jobs:
     # is guarded by tests/test_action_step_validation.py, which
     # requires every phrase of every open command to appear below.
     # yamllint disable-line rule:line-length
-    if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && ((inputs.PR_NUMBER != '' && inputs.PR_NUMBER != '0') || inputs.GERRIT_CHANGE_URL != '')) || (github.event.pull_request.number && github.event_name != 'pull_request_review' && github.event_name != 'pull_request_review_comment' && (github.event_name != 'pull_request' || inputs.G2G_NO_GERRIT || inputs.DRY_RUN || vars.G2G_NO_GERRIT == 'true' || github.event.pull_request.head.repo.full_name == github.repository)) || (github.event.issue.number && github.event.issue.pull_request && github.event.issue.state == 'open' && contains(github.event.comment.body, '@github2gerrit') && (contains(github.event.comment.body, 'check') || contains(github.event.comment.body, 'recheck') || contains(github.event.comment.body, 'retry'))) }}
+    if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && ((inputs.PR_NUMBER != '' && inputs.PR_NUMBER != '0') || inputs.GERRIT_CHANGE_URL != '')) || (github.event.pull_request.number && github.event_name != 'pull_request_review' && github.event_name != 'pull_request_review_comment' && (github.event_name != 'pull_request' || inputs.G2G_NO_GERRIT || inputs.DRY_RUN || vars.G2G_NO_GERRIT == 'true' || github.event.pull_request.head.repo.full_name == github.repository) && !(inputs.SKIP_FORKS && github.event.pull_request.head.repo.full_name != github.repository)) || (github.event.issue.number && github.event.issue.pull_request && github.event.issue.state == 'open' && contains(github.event.comment.body, '@github2gerrit') && (contains(github.event.comment.body, 'check') || contains(github.event.comment.body, 'recheck') || contains(github.event.comment.body, 'retry'))) }}
     runs-on: ubuntu-latest
     timeout-minutes: 12
     permissions:
@@ -533,6 +548,7 @@ jobs:
           CLEANUP_GERRIT: ${{ inputs.CLEANUP_GERRIT }}
           CREATE_MISSING: ${{ inputs.CREATE_MISSING }}
           AUTOMATION_ONLY: ${{ inputs.AUTOMATION_ONLY }}
+          SKIP_FORKS: ${{ inputs.SKIP_FORKS }}
           NORMALISE_COMMIT: ${{ inputs.NORMALISE_COMMIT }}
           COMMIT_RULES_JSON: ${{ inputs.COMMIT_RULES_JSON }}
           ALLOW_DUPLICATES: ${{ inputs.ALLOW_DUPLICATES }}
@@ -879,6 +895,7 @@ jobs:
           CLEANUP_GERRIT: ${{ inputs.CLEANUP_GERRIT }}
           CREATE_MISSING: ${{ inputs.CREATE_MISSING }}
           AUTOMATION_ONLY: ${{ inputs.AUTOMATION_ONLY }}
+          SKIP_FORKS: ${{ inputs.SKIP_FORKS }}
           NORMALISE_COMMIT: ${{ inputs.NORMALISE_COMMIT }}
           COMMIT_RULES_JSON: ${{ inputs.COMMIT_RULES_JSON }}
           ALLOW_DUPLICATES: ${{ inputs.ALLOW_DUPLICATES }}

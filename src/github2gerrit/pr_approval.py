@@ -366,6 +366,28 @@ def render_blocked_comment(
     return "\n".join(lines)
 
 
+def render_forks_skipped_comment() -> str:
+    """Build the notice posted when SKIP_FORKS turns a pull request away.
+
+    Carries the approval marker so it occupies the same single comment
+    the gate would otherwise edit, and so a later run that finds the
+    policy lifted replaces it rather than adding another.
+    """
+    return "\n".join(
+        [
+            APPROVAL_MARKER,
+            "### Not transferred to Gerrit",
+            "",
+            "This repository does not transfer pull requests raised from "
+            "a fork to Gerrit, nor any whose origin the tool could not "
+            "establish. No review can lift this; it is repository policy "
+            "(`SKIP_FORKS`).",
+            "",
+            "Please submit the change to the project's Gerrit server directly.",
+        ]
+    )
+
+
 def describe_approver_policy() -> str:
     """Describe who may approve, including any opt-in source.
 

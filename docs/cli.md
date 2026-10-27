@@ -89,6 +89,7 @@ set by GitHub Actions) and undergo proper boolean parsing.
 | `--organization TEXT`                            | `ORGANIZATION`          | unset   | Organization (defaults to `GITHUB_REPOSITORY_OWNER` when unset)                |
 | `--github-actor TEXT`                            | `GITHUB_ACTOR`          | `""`    | GitHub actor (username) who triggered the workflow                             |
 | `--automation-only/--no-automation-only`         | `AUTOMATION_ONLY`       | `true`  | Accept pull requests from known automation tools                               |
+| `--skip-forks/--no-skip-forks`                   | `SKIP_FORKS`            | `false` | Never transfer a pull request whose head is not in this repository             |
 | `--ci-testing/--no-ci-testing`                   | `CI_TESTING`            | `false` | CI testing mode: override `.gitreview`, handle unrelated repositories          |
 | `--allow-ghe-urls/--no-allow-ghe-urls`           | `ALLOW_GHE_URLS`        | `false` | Allow non-github.com GitHub Enterprise URLs in direct URL mode                 |
 

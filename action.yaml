@@ -172,6 +172,14 @@ inputs:
     description: "Only accept pull requests from known automation tools"
     required: false
     default: "true"
+  SKIP_FORKS:
+    description: >-
+      Never transfer a pull request whose head is not in this repository,
+      whatever its reviews say. Covers forks and any pull request whose
+      origin cannot be established. For repositories that take no
+      outside contributions through GitHub.
+    required: false
+    default: "false"
   CLEANUP_ABANDONED:
     description: "Close GitHub PRs when their Gerrit changes are abandoned"
     required: false
@@ -474,6 +482,7 @@ runs:
         G2G_INFO_YAML_MATCH_LFID: ${{ inputs.G2G_INFO_YAML_MATCH_LFID }}
         G2G_VERBOSE: ${{ inputs.VERBOSE }}
         AUTOMATION_ONLY: ${{ inputs.AUTOMATION_ONLY }}
+        SKIP_FORKS: ${{ inputs.SKIP_FORKS }}
         CLEANUP_ABANDONED: ${{ inputs.CLEANUP_ABANDONED }}
         CLEANUP_GERRIT: ${{ inputs.CLEANUP_GERRIT }}
         CREATE_MISSING: ${{ inputs.CREATE_MISSING }}

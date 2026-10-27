@@ -269,6 +269,7 @@ uvx github2gerrit https://github.com/onap/portal-ng-bff/pull/33
 | `ALLOW_DUPLICATES`             | No       | `"true"`         | Allow submitting duplicate changes without error               |
 | `DUPLICATE_TYPES`              | No       | `"open"`         | Comma-separated Gerrit states checked for duplicates           |
 | `AUTOMATION_ONLY`              | No       | `"true"`         | Accept PRs from known automation tools only                    |
+| `SKIP_FORKS`                   | No       | `"false"`        | Never transfer PRs whose head is not in this repository        |
 | `NORMALISE_COMMIT`             | No       | `"false"`        | Normalize commit messages to conventional commit format        |
 | `COMMIT_RULES_JSON`            | No       | `""`             | JSON commit message validation rules (see docs)                |
 | `ISSUE_ID`                     | No       | `""`             | Issue ID trailer to include (e.g. `ABC-123`)                   |
@@ -371,6 +372,7 @@ Input defaults match the composite action defaults.
 | `CLEANUP_GERRIT`               | boolean | `true`           | Abandon Gerrit changes when their PR closes      |
 | `CREATE_MISSING`               | boolean | `false`          | Create a change when UPDATE finds none           |
 | `AUTOMATION_ONLY`              | boolean | `true`           | Accept PRs from known automation tools only      |
+| `SKIP_FORKS`                   | boolean | `false`          | Never transfer PRs from outside this repository  |
 | `NORMALISE_COMMIT`             | boolean | `false`          | Normalize commit messages                        |
 | `COMMIT_RULES_JSON`            | string  | `""`             | JSON commit message validation rules             |
 | `ALLOW_DUPLICATES`             | boolean | `true`           | Allow submitting duplicate changes               |
@@ -442,6 +444,12 @@ design.
   on, so an upgrade cannot change it silently. When enabled, the gate
   accepts a pull request only from a known automation login on a Bot
   account, and rejects one whose author it cannot read.
+- Set `SKIP_FORKS: true` on a repository that takes no outside
+  contributions through GitHub. It refuses every pull request whose
+  head is not in the repository, whatever its reviews say, and with the
+  reusable workflow the job does not start for one, so the key never
+  reaches a runner on a fork's account. See
+  [refusing fork pull requests](docs/features.md#refusing-fork-pull-requests).
 - SSH handling is non-invasive: the tool creates temporary SSH files
   in the workspace without modifying user SSH configuration or keys,
   and cleans them up after execution.

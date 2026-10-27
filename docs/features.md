@@ -668,6 +668,33 @@ That refusal fails the run, unlike the ordinary blocked case, because it falls
 outside the normal course of events. The push that caused it triggers a fresh
 run, which asks for approval of the new commit in the usual way.
 
+### Refusing fork pull requests
+
+A repository that takes no outside contributions through GitHub has no use
+for the approval path at all. Set `SKIP_FORKS: true` and the tool refuses
+every pull request whose head is not in the repository — forks, and any whose
+origin it cannot establish — whatever its reviews say. The check sits where
+the approval gate does, ahead of any fetch and of the Gerrit key, and unlike
+the gate it applies to direct CLI runs too: the operator stated the policy,
+and an operator at the keyboard earns no exemption from their own rule.
+
+The refused pull request stays open, and the tool leaves one notice on it
+saying the repository does not transfer fork pull requests and pointing the
+contributor at Gerrit. The notice occupies the same comment the approval gate
+would edit, so a later event updates it rather than adding another.
+
+With the reusable workflow the job itself does not start for a
+`pull_request_target` event whose payload shows a fork head, or no head
+repository at all (a deleted fork), so the Gerrit key never reaches a runner
+on such a pull request's account. Routes whose payload names no head
+repository — a comment re-check, a dispatch naming the pull request, a
+scheduled sweep — still run, and the tool applies the same refusal there.
+
+The setting is independent of `AUTOMATION_ONLY`. A Gerrit mirror that
+receives only Dependabot and similar updates would set both: the author gate
+rejects a human-authored pull request, and the fork policy removes the
+approval path as an avenue regardless of who the author is.
+
 ## Duplicate Detection
 
 Duplicate detection uses a scoring-based approach. The detector compares the
