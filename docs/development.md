@@ -131,16 +131,17 @@ expected behavior.
 
 ### Testing action changes in forks and branches
 
-The action normally installs the published PyPI package. When testing
-changes in a fork or branch before merging, set the `USE_LOCAL_ACTION`
-input to `"true"` so the action uses the local repository code instead:
+The action installs the tool from its own checkout, so pointing a
+caller at a fork or branch runs that code, with no further input:
 
 ```yaml
 - uses: my-fork/github2gerrit-action@my-branch
   with:
-    USE_LOCAL_ACTION: "true"
-    # ... other inputs
+    # ... inputs
 ```
+
+The action ignores the deprecated `USE_LOCAL_ACTION` input, which once
+selected this over the PyPI release.
 
 ## Notes on Parity
 

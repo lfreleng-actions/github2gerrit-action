@@ -9,11 +9,9 @@ name: "GitHub2Gerrit [R]"
 # The composite action is not pinned to a separate version: this
 # workflow checks out the action from its own repository at the exact
 # commit the caller pinned this workflow to (job.workflow_sha) and
-# runs it as a local action. Workflow and action therefore always
-# ship as one unit with matching input interfaces, and the Python tool
-# itself installs as the latest release from PyPI at runtime (uvx).
-# The bulk sweep's legs are the exception: they rely on tool behaviour
-# from this same commit, and install the tool from it instead.
+# runs it as a local action. The action in turn installs the Python
+# tool from that same checkout, so workflow, action and tool ship as
+# one unit: the commit a caller pins is the code that runs.
 #
 # Supported caller trigger events:
 #
@@ -854,8 +852,8 @@ jobs:
         # As in github2gerrit: $/ is unavailable on Enterprise Server
         uses: ./.g2g-action  # zizmor: ignore[self-repository]
         env:
-          # The lines that make this a leg (with USE_LOCAL_ACTION and
-          # PR_NUMBER below); everything else matches github2gerrit's
+          # The lines that make this a leg (with PR_NUMBER below);
+          # everything else matches github2gerrit's
           G2G_SWEEP_LEG: "true"
           GERRIT_CHANGE_URL: ${{ inputs.GERRIT_CHANGE_URL }}
           GERRIT_EVENT_TYPE: ${{ inputs.GERRIT_EVENT_TYPE }}
@@ -872,13 +870,6 @@ jobs:
           # yamllint enable rule:line-length
         with:
           PR_NUMBER: ${{ matrix.pr }}
-          # A leg depends on G2G_SWEEP_LEG, which a tool older than this
-          # workflow ignores: the pr 0 leg would then sweep every pull
-          # request in one job alongside the legs doing the same, the
-          # race this job exists to remove. So legs run the tool from
-          # this workflow's own commit rather than the latest PyPI
-          # release, which can lag it; github2gerrit keeps the release.
-          USE_LOCAL_ACTION: "true"
           SUBMIT_SINGLE_COMMITS: ${{ inputs.SUBMIT_SINGLE_COMMITS }}
           USE_PR_AS_COMMIT: ${{ inputs.USE_PR_AS_COMMIT }}
           FETCH_DEPTH: ${{ inputs.FETCH_DEPTH }}

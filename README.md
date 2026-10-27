@@ -16,7 +16,9 @@ edits, closure, and cleanup.
 
 The implementation is a Python CLI tool (`github2gerrit`, published to
 PyPI) wrapped in a GitHub composite action, plus a reusable workflow
-for straightforward deployment in consuming repositories.
+for straightforward deployment in consuming repositories. The action
+and the reusable workflow run the tool from their own checkout, not
+from PyPI: the commit a caller pins is the code that runs.
 
 ## Goals and purpose
 
@@ -283,7 +285,7 @@ uvx github2gerrit https://github.com/onap/portal-ng-bff/pull/33
 | `ALLOW_GHE_URLS`               | No       | `"false"`        | Allow GitHub Enterprise URLs in direct URL mode                |
 | `VERBOSE`                      | No       | `"false"`        | Verbose output (sets log level to DEBUG)                       |
 | `CI_TESTING`                   | No       | `"false"`        | CI testing mode; overrides `.gitreview`                        |
-| `USE_LOCAL_ACTION`             | No       | `"false"`        | Use local repository code instead of the PyPI package          |
+| `USE_LOCAL_ACTION`             | No       | `"false"`        | Deprecated and ignored; the action runs its own checkout       |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -404,8 +406,8 @@ GitHub PR instead of processing pull requests.
 Repository variables provide operational kill switches: set
 `G2G_NO_GERRIT` to `true` to skip Gerrit interaction, or
 `G2G_DISABLED` to `true` to exit immediately without processing.
-Test-only settings (`CI_TESTING`, `USE_LOCAL_ACTION`) remain
-composite-action-only by design.
+The test-only setting `CI_TESTING` remains composite-action-only by
+design.
 
 ## Documentation
 
@@ -425,6 +427,17 @@ composite-action-only by design.
 - Do not hardcode secrets or keys. Provide the private key through
   workflow secrets and known hosts through repository or organization
   variables.
+- Pin the action or reusable workflow to a commit SHA. That pin covers
+  everything that runs with the Gerrit key: the action installs the
+  tool from its own checkout, every dependency version comes from the
+  lockfile at that commit (build-time ones included), and `uv` itself
+  is the release the lockfile names. Dependabot keeps the lockfile
+  current, so nothing needs a manual bump after a release.
+- Do not check the pull request head out in the calling workflow. Pull
+  request runs need no checkout: the tool fetches the head into a
+  temporary directory of its own. A fork head in the workspace would
+  sit beside the key for no reason, and would carry a `.gitreview` and
+  Python tooling configuration of the fork's choosing.
 - SSH handling is non-invasive: the tool creates temporary SSH files
   in the workspace without modifying user SSH configuration or keys,
   and cleans them up after execution.

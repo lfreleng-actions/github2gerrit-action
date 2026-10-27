@@ -33,11 +33,12 @@ a pull request, not the full set:
 
 ## Repository specifics
 
-Outside this repository, and unless the caller sets
-`USE_LOCAL_ACTION: true`, the action runs an unpinned `github2gerrit`
-release from PyPI (`uvx --from github2gerrit`), not the code at the
-commit the caller pins. A new release has to keep honouring every
-environment variable the CLI reads, as earlier `action.yaml` versions
-set them: renaming or removing one breaks callers on that default route
-whose pinned action commit predates the change. CI here always runs
-the local source, so it cannot catch the breakage.
+The action installs the `github2gerrit` tool from its own checkout, so
+the commit a caller pins is the code that runs; the PyPI release plays
+no part in it. Callers pinned to action commits older than that change
+still run the latest PyPI release at run time (`uvx --from
+github2gerrit`), so until they move, a new release has to keep
+honouring every environment variable the CLI reads, as those earlier
+`action.yaml` versions set them: renaming or removing one breaks such a
+caller. CI here always runs the local source, so it cannot catch the
+breakage.

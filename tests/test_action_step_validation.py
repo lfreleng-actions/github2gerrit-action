@@ -905,7 +905,7 @@ class TestActionStepValidation:
         assert "cache" not in with_config
 
     def test_uv_setup_step(self, action_config):
-        """Test UV setup step configuration."""
+        """Test uv setup step configuration."""
         steps = action_config["runs"]["steps"]
         uv_step = next(
             (step for step in steps if step.get("name") == "Setup uv"), None
@@ -913,6 +913,17 @@ class TestActionStepValidation:
 
         assert uv_step is not None
         assert uv_step["uses"].startswith("astral-sh/setup-uv@")
+
+        # The uv release is pinned by the lockfile shipped at this
+        # commit, read from the action's own checkout; left to its
+        # defaults setup-uv consults the caller's workspace, which a
+        # caller may have filled with a pull request head.
+        with_config = uv_step["with"]
+        assert with_config["version-file"] == (
+            "${{ github.action_path }}/uv.lock"
+        )
+        assert with_config["working-directory"] == "${{ github.action_path }}"
+        assert "version" not in with_config
 
     def test_repository_checkout_restricted_to_push(self, action_config):
         """No checkout may place pull request head content in the runner.
@@ -967,7 +978,12 @@ class TestActionStepValidation:
             )
 
     def test_dependency_installation_step(self, action_config):
-        """Test dependency installation step."""
+        """The tool installs from this action's own checkout.
+
+        The commit a caller pins is then the code that runs with the
+        Gerrit key. The PyPI release is never consulted: it would run
+        whatever is newest there, which the pin never covered.
+        """
         steps = action_config["runs"]["steps"]
         install_step = next(
             (
@@ -980,19 +996,35 @@ class TestActionStepValidation:
 
         assert install_step is not None
         assert install_step["shell"] == "bash"
+        assert install_step["id"] == "setup-g2g"
 
         script = install_step["run"]
         assert "uv --version" in script
-        # Inputs/context are passed via env (not inline ${{ }}) to avoid
-        # template injection; the script branches on env/built-in vars.
-        assert "GITHUB_REPOSITORY" in script
-        assert "=~ lfreleng-actions/github2gerrit-action" in script
-        assert 'uv pip install --system "${GITHUB_ACTION_PATH}"' in script
-        assert "uvx will install GitHub2Gerrit from PyPI" in script
-        # USE_LOCAL_ACTION is provided through the step env block.
-        assert install_step.get("env", {}).get("USE_LOCAL_ACTION") == (
-            "${{ inputs.USE_LOCAL_ACTION }}"
+        assert 'uv tool install --from "${GITHUB_ACTION_PATH}"' in script
+        # Every version, build-time ones included, comes from the
+        # lockfile at this commit.
+        assert 'uv export --directory "${GITHUB_ACTION_PATH}" --frozen' in (
+            script
         )
+        assert "--all-groups" in script
+        assert '--constraints "${constraints}"' in script
+        assert '--build-constraints "${constraints}"' in script
+        # No route back to the PyPI release, whatever the caller sets.
+        assert "uvx" not in script
+        assert "uv pip install" not in script
+        assert "USE_LOCAL_ACTION" not in script
+        assert "USE_LOCAL_ACTION" not in install_step.get("env", {})
+
+        # The install lands in a directory of this job's own rather
+        # than the runner's home, which persists on self-hosted
+        # runners.
+        env = install_step["env"]
+        assert env["UV_TOOL_DIR"].startswith("${{ runner.temp }}/")
+        assert env["UV_TOOL_BIN_DIR"].startswith(env["UV_TOOL_DIR"])
+        assert (
+            'echo "github2gerrit=${UV_TOOL_BIN_DIR}/github2gerrit" '
+            '>> "$GITHUB_OUTPUT"'
+        ) in script
 
     def test_cli_execution_step(self, action_config):
         """Test CLI execution step configuration."""
@@ -1014,8 +1046,15 @@ class TestActionStepValidation:
         env_config = cli_step.get("env", {})
         assert len(env_config) > 20  # Many environment variables
 
+        # Runs the executable the setup step installed, and nothing
+        # else: no resolution or build happens with the key in scope.
+        assert env_config["GITHUB2GERRIT"] == (
+            "${{ steps.setup-g2g.outputs.github2gerrit }}"
+        )
         script = cli_step["run"]
-        assert "python -m github2gerrit.cli" in script
+        assert '"${GITHUB2GERRIT}"' in script
+        assert "uvx" not in script
+        assert "python -m" not in script
 
     def test_output_capture_step(self, action_config):
         """Test output capture step configuration."""

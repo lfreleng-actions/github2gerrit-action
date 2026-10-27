@@ -87,8 +87,10 @@ inputs:
     default: ""
   USE_LOCAL_ACTION:
     description: >-
-      Use local repository action/code instead of the PyPI package.
-      Set to 'true' when testing changes in a fork or branch before merging.
+      Deprecated and ignored. The action now always runs the tool from
+      its own checkout, so the commit a caller pins is the code that
+      runs; this input once selected that over the PyPI release. It is
+      kept so that callers still setting it are not broken.
     required: false
     default: "false"
   G2G_USE_SSH_AGENT:
@@ -268,29 +270,79 @@ runs:
       # yamllint disable-line rule:line-length
       uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
       with:
+        # Both paths point into this action's own checkout. Left at
+        # their defaults, setup-uv reads the caller's workspace for a
+        # required-version and a cache-dir, and a caller that checked a
+        # pull request head out there would let the fork choose the uv
+        # that runs beside the Gerrit key. The lockfile names the exact
+        # uv release (the `toolchain` dependency group in
+        # pyproject.toml exists to put it there), and Dependabot's uv
+        # ecosystem moves that pin like any other dependency.
+        working-directory: ${{ github.action_path }}
+        version-file: ${{ github.action_path }}/uv.lock
         enable-cache: false
 
     - name: "Setup github2gerrit"
       if: steps.disabled-check.outputs.disabled != 'true'
+      id: setup-g2g
       shell: bash
       env:
-        # Provide version for hatch-vcs (via setuptools-scm)
-        # when git metadata is unavailable
-        # GitHub Actions shallow checkout doesn't include .git history
-        SETUPTOOLS_SCM_PRETEND_VERSION: "0.0.0+dev"
-        USE_LOCAL_ACTION: ${{ inputs.USE_LOCAL_ACTION }}
+        ACTION_REF: ${{ github.action_ref }}
+        # A tool directory of this job's own. The default lives under
+        # the runner's home, which persists between jobs on a
+        # self-hosted runner and could hand a later run an earlier
+        # install; and nothing else on the runner shares this one.
+        UV_TOOL_DIR: ${{ runner.temp }}/github2gerrit-tool
+        UV_TOOL_BIN_DIR: ${{ runner.temp }}/github2gerrit-tool/bin
       run: |
-        # Setup github2gerrit
+        # Install github2gerrit from this action's own checkout
         set -euo pipefail
         uv --version
-        # Install locally for self-testing, use uvx for external repos
-        if [[ "${USE_LOCAL_ACTION}" == "true" ]] || \
-           [[ "${GITHUB_REPOSITORY}" =~ lfreleng-actions/github2gerrit-action ]]; then
-          echo "Installing with: uv pip install --system ${GITHUB_ACTION_PATH}"
-          uv pip install --system "${GITHUB_ACTION_PATH}"
-        else
-          echo "uvx will install GitHub2Gerrit from PyPI"
-        fi
+
+        # The tool installs from the tree the runner fetched for this
+        # action, so the commit a caller pins is the code that runs
+        # against Gerrit. Installing the PyPI release instead would run
+        # whatever is newest there, which the pin never covered.
+        #
+        # Every dependency version, build-time ones included, comes from
+        # the lockfile shipped at that same commit: it is exported as
+        # constraints for the install and for building the package.
+        # Dependabot keeps the lockfile current; nothing here needs a
+        # bump when a release is cut.
+        constraints="${RUNNER_TEMP}/github2gerrit-constraints.txt"
+        uv export --directory "${GITHUB_ACTION_PATH}" --frozen \
+          --all-groups --no-emit-project --no-hashes \
+          --output-file "${constraints}"
+
+        # hatch-vcs takes the version from git metadata, which the
+        # runner's action download does not carry. Derive it from the
+        # ref the caller pinned, else from the checkout the reusable
+        # workflow makes, so the tool's banner names what runs: a
+        # release tag gives its version, a commit its abbreviated SHA.
+        version=""
+        for ref in "${ACTION_REF:-}" \
+          "$(git -C "${GITHUB_ACTION_PATH}" rev-parse HEAD 2>/dev/null || true)"
+        do
+          if [[ "${ref}" =~ ^v?([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            version="${BASH_REMATCH[1]}"
+            break
+          elif [[ "${ref}" =~ ^[0-9a-f]{40}$ ]]; then
+            version="0.0.0+g${ref:0:12}"
+            break
+          fi
+        done
+        export SETUPTOOLS_SCM_PRETEND_VERSION="${version:-0.0.0+dev}"
+        echo "Installing github2gerrit ${SETUPTOOLS_SCM_PRETEND_VERSION}" \
+          "from ${GITHUB_ACTION_PATH}"
+
+        # uv tool commands read no project-level configuration, so a
+        # pyproject.toml or uv.toml in the workspace cannot redirect
+        # the index this resolves against.
+        uv tool install --from "${GITHUB_ACTION_PATH}" \
+          --constraints "${constraints}" \
+          --build-constraints "${constraints}" \
+          github2gerrit
+        echo "github2gerrit=${UV_TOOL_BIN_DIR}/github2gerrit" >> "$GITHUB_OUTPUT"
 
     - name: "Validate PR_NUMBER usage"
       # A scheduled sweep names its pull request the same way a dispatch
@@ -455,19 +507,15 @@ runs:
         PR_NUMBER: ${{ steps.extract.outputs.pr_number }}
         G2G_TEST_MODE: "false"
         G2G_NO_GERRIT: ${{ inputs.G2G_NO_GERRIT }}
-        USE_LOCAL_ACTION: ${{ inputs.USE_LOCAL_ACTION }}
+        GITHUB2GERRIT: ${{ steps.setup-g2g.outputs.github2gerrit }}
       run: |
         # Run github2gerrit Python CLI
         set -euo pipefail
-        # Use different invocation methods based on repository or USE_LOCAL_ACTION flag
-        if [[ "${USE_LOCAL_ACTION}" == "true" ]] || \
-           [[ "${GITHUB_REPOSITORY}" =~ lfreleng-actions/github2gerrit-action ]]; then
-          echo "Running:python -m github2gerrit.cli"
-          python -m github2gerrit.cli
-        else
-          echo "Running: uvx --from github2gerrit github2gerrit"
-          uvx --from github2gerrit github2gerrit
-        fi
+        # The executable the setup step installed from this action's
+        # own checkout; nothing is resolved or built with the Gerrit
+        # credential in scope.
+        echo "Running: ${GITHUB2GERRIT}"
+        "${GITHUB2GERRIT}"
 
     - name: "Capture outputs"
       if: steps.disabled-check.outputs.disabled != 'true'
