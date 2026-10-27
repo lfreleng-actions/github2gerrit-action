@@ -344,13 +344,15 @@ processing to known automation tools. Use this for GitHub mirrors where
 contributors should submit changes via Gerrit, while still accepting
 automated dependency updates.
 
-Recognized automation tool usernames:
+Recognized automation tools. Each is a GitHub App, so the check
+requires the author to be a Bot account carrying one of these logins;
+a user account with the same name does not pass:
 
-| Tool           | GitHub Username(s)                    |
-| -------------- | ------------------------------------- |
-| Dependabot     | `dependabot[bot]`, `dependabot`       |
-| Pre-commit.ci  | `pre-commit-ci[bot]`, `pre-commit-ci` |
-| GitHub Copilot | `Copilot`                             |
+| Tool           | GitHub login         |
+| -------------- | -------------------- |
+| Dependabot     | `dependabot[bot]`    |
+| Pre-commit.ci  | `pre-commit-ci[bot]` |
+| GitHub Copilot | `Copilot`            |
 
 When enabled, the tool rejects PRs from other users by:
 
@@ -363,6 +365,10 @@ When enabled, the tool rejects PRs from other users by:
    ```
 
 3. Exiting with code 1.
+
+The tool also rejects a PR whose author it cannot read (exit code 1),
+but leaves it open: the gate fails closed, and the tool cannot say
+whose the PR is.
 
 Set `AUTOMATION_ONLY: "false"` to accept PRs from all users:
 

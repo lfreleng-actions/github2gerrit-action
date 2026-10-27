@@ -247,32 +247,43 @@ def _check_automation_only(
         log.debug("AUTOMATION_ONLY disabled, accepting all PRs")
         return
 
-    # Known automation tools
+    # Known automation tools. Each is a GitHub App, so its pull requests
+    # come from a Bot account; the login alone is not the test, since
+    # that would rest on GitHub keeping the name reserved.
     known_automation_tools = [
         "Copilot",
         "dependabot[bot]",
-        "dependabot",
         "pre-commit-ci[bot]",
-        "pre-commit-ci",
     ]
 
-    pr_author = getattr(getattr(pr_obj, "user", None), "login", "")
+    pr_user = getattr(pr_obj, "user", None)
+    pr_author = getattr(pr_user, "login", "")
+    pr_author_type = getattr(pr_user, "type", "")
     if not pr_author:
-        log.warning("Unable to determine PR author, allowing PR to proceed")
-        return
+        # Fail closed: this gate is what keeps a mirror from relaying
+        # arbitrary pull requests to Gerrit. The pull request stays open
+        # for a person to look at, as the tool cannot say whose it is.
+        log.error(
+            "PR #%s rejected - unable to determine its author while "
+            "AUTOMATION_ONLY is enabled",
+            gh.pr_number,
+        )
+        sys.exit(0 if _is_sweep_leg() else 1)
 
     log.debug(
-        "Checking PR author '%s' against known automation tools",
+        "Checking PR author '%s' (%s) against known automation tools",
         pr_author,
+        pr_author_type or "unknown type",
     )
 
     # Check if author is in known automation tools list
-    if pr_author not in known_automation_tools:
+    if pr_author not in known_automation_tools or pr_author_type != "Bot":
         log.warning(
-            "PR #%s from '%s' rejected - only known automation tools "
+            "PR #%s from '%s' (%s) rejected - only known automation tools "
             "are accepted when AUTOMATION_ONLY is enabled",
             gh.pr_number,
             pr_author,
+            pr_author_type or "unknown type",
         )
 
         # Close PR with comment
@@ -2211,7 +2222,8 @@ def _process_bulk_pr(
     try:
         _check_automation_only(pr, per_ctx, progress_tracker)
     except SystemExit:
-        # PR was rejected and closed, skip processing
+        # PR was rejected (and closed, when its author was known);
+        # skip processing
         log.debug("PR #%d rejected by automation_only check", pr_number)
         return "skipped", None, None
 

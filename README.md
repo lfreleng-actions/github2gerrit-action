@@ -438,6 +438,10 @@ design.
   temporary directory of its own. A fork head in the workspace would
   sit beside the key for no reason, and would carry a `.gitreview` and
   Python tooling configuration of the fork's choosing.
+- Set `AUTOMATION_ONLY` explicitly to the value the repository relies
+  on, so an upgrade cannot change it silently. When enabled, the gate
+  accepts a pull request only from a known automation login on a Bot
+  account, and rejects one whose author it cannot read.
 - SSH handling is non-invasive: the tool creates temporary SSH files
   in the workspace without modifying user SSH configuration or keys,
   and cleans them up after execution.
