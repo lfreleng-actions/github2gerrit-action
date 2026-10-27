@@ -325,14 +325,18 @@ jobs:
     #
     # pull_request_target on a fork head is deliberately kept: it runs
     # from the default branch, holds the credentials, and is the
-    # trigger that applies the approval gate. Unless SKIP_FORKS is set:
-    # a repository that takes no fork pull requests has no gate to
-    # apply, so the job does not start and the credentials never reach
-    # a runner for one. A deleted fork reports no head repository and
-    # is excluded the same way, as the tool would treat it. Routes
-    # whose payload names no head repository (issue_comment, dispatch,
-    # schedule) still run and the tool applies the same policy, with a
-    # notice on the pull request.
+    # trigger that applies the approval gate. It is kept with
+    # SKIP_FORKS set as well, although the tool then refuses the pull
+    # request outright, because the refusal is where the pull request
+    # gets its answer: the author gate closes a human-authored one with
+    # a comment, and the fork policy leaves a notice pointing the
+    # contributor at Gerrit. This is the only trigger a contributor's
+    # own pull request fires; a comment re-check, a dispatch and a
+    # sweep take a maintainer. Skipping the job here would keep the
+    # key off the runner for such a run, at the price of leaving the
+    # pull request open in silence. The tool exits before fetching
+    # anything from the fork and before the key is materialised, as
+    # on every other route.
     #
     # A bulk workflow_dispatch (PR_NUMBER of 0 or unset) does not run
     # here. One job covering every pull request cannot share a lock
@@ -368,7 +372,7 @@ jobs:
     # is guarded by tests/test_action_step_validation.py, which
     # requires every phrase of every open command to appear below.
     # yamllint disable-line rule:line-length
-    if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && ((inputs.PR_NUMBER != '' && inputs.PR_NUMBER != '0') || inputs.GERRIT_CHANGE_URL != '')) || (github.event.pull_request.number && github.event_name != 'pull_request_review' && github.event_name != 'pull_request_review_comment' && (github.event_name != 'pull_request' || inputs.G2G_NO_GERRIT || inputs.DRY_RUN || vars.G2G_NO_GERRIT == 'true' || github.event.pull_request.head.repo.full_name == github.repository) && !(inputs.SKIP_FORKS && github.event.pull_request.head.repo.full_name != github.repository)) || (github.event.issue.number && github.event.issue.pull_request && github.event.issue.state == 'open' && contains(github.event.comment.body, '@github2gerrit') && (contains(github.event.comment.body, 'check') || contains(github.event.comment.body, 'recheck') || contains(github.event.comment.body, 'retry'))) }}
+    if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && ((inputs.PR_NUMBER != '' && inputs.PR_NUMBER != '0') || inputs.GERRIT_CHANGE_URL != '')) || (github.event.pull_request.number && github.event_name != 'pull_request_review' && github.event_name != 'pull_request_review_comment' && (github.event_name != 'pull_request' || inputs.G2G_NO_GERRIT || inputs.DRY_RUN || vars.G2G_NO_GERRIT == 'true' || github.event.pull_request.head.repo.full_name == github.repository)) || (github.event.issue.number && github.event.issue.pull_request && github.event.issue.state == 'open' && contains(github.event.comment.body, '@github2gerrit') && (contains(github.event.comment.body, 'check') || contains(github.event.comment.body, 'recheck') || contains(github.event.comment.body, 'retry'))) }}
     runs-on: ubuntu-latest
     timeout-minutes: 12
     permissions:

@@ -284,20 +284,67 @@ runs:
 
     - name: "Setup uv"
       if: steps.disabled-check.outputs.disabled != 'true'
-      # yamllint disable-line rule:line-length
-      uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
-      with:
-        # Both paths point into this action's own checkout. Left at
-        # their defaults, setup-uv reads the caller's workspace for a
-        # required-version and a cache-dir, and a caller that checked a
-        # pull request head out there would let the fork choose the uv
-        # that runs beside the Gerrit key. The lockfile names the exact
-        # uv release (the `toolchain` dependency group in
-        # pyproject.toml exists to put it there), and Dependabot's uv
-        # ecosystem moves that pin like any other dependency.
-        working-directory: ${{ github.action_path }}
-        version-file: ${{ github.action_path }}/uv.lock
-        enable-cache: false
+      id: setup-uv
+      shell: bash
+      env:
+        PYTHON: ${{ steps.setup-python.outputs.python-path }}
+      run: |
+        # Install the locked uv release from its lockfile hashes
+        set -euo pipefail
+
+        # uv is a locked dependency like the rest: the `toolchain`
+        # dependency group in pyproject.toml exists to put its release
+        # in uv.lock, and Dependabot's uv ecosystem moves that pin like
+        # any other. It is installed from that entry rather than from a
+        # GitHub release. A release archive is verified against a
+        # checksum published beside it, which says only that the two
+        # were published together; the lockfile's wheel hashes say
+        # which bytes this commit expects. The entry is handed to pip
+        # with every hash it records, wheels only and no dependencies,
+        # so pip picks the wheel for the runner and refuses any file
+        # whose hash the lockfile does not carry. The index is the one
+        # the lockfile names, written into the requirements file so
+        # that neither the caller's pip configuration nor its
+        # environment can add another (--isolated ignores both); it
+        # can serve the locked bytes or fail, nothing else.
+        #
+        # Into a directory made fresh for this invocation under
+        # runner.temp, with no pip cache, for the reasons the install
+        # step below gives for its own environment and cache. Python
+        # runs from that directory and in isolated mode (-I): on push
+        # events the working directory is the caller's checkout, and a
+        # tomllib.py, venv/ or pip/ there would otherwise shadow the
+        # modules used here, since the interpreter puts its working
+        # directory first on sys.path; -I leaves it off, along with
+        # PYTHONPATH and the user site, which pip's --isolated does not
+        # cover.
+        base="$(mktemp -d "${RUNNER_TEMP}/github2gerrit-uv.XXXXXX")"
+        cd "${base}"
+        "${PYTHON}" -I - "${GITHUB_ACTION_PATH}/uv.lock" \
+          "${base}/requirements.txt" <<'PY'
+        import sys
+        import tomllib
+
+        lock_path, out_path = sys.argv[1:]
+        with open(lock_path, "rb") as fh:
+            lock = tomllib.load(fh)
+        (entry,) = [p for p in lock["package"] if p["name"] == "uv"]
+        lines = [
+            f"--index-url {entry['source']['registry']}",
+            f"uv=={entry['version']} \\",
+        ]
+        lines += [f"    --hash={w['hash']} \\" for w in entry["wheels"]]
+        lines[-1] = lines[-1].rstrip(" \\")
+        with open(out_path, "w") as fh:
+            fh.write("\n".join(lines) + "\n")
+        PY
+        "${PYTHON}" -I -m venv "${base}/venv"
+        "${base}/venv/bin/python" -I -m pip --isolated \
+          --disable-pip-version-check install --no-cache-dir \
+          --require-hashes --only-binary :all: --no-deps \
+          -r "${base}/requirements.txt"
+        "${base}/venv/bin/uv" --version
+        echo "uv_dir=${base}/venv/bin" >> "$GITHUB_OUTPUT"
 
     - name: "Setup github2gerrit"
       if: steps.disabled-check.outputs.disabled != 'true'
@@ -305,6 +352,9 @@ runs:
       shell: bash
       env:
         ACTION_REF: ${{ github.action_ref }}
+        # The uv the step above installed from the lockfile; nothing
+        # else on the runner's PATH is consulted for it.
+        UV_DIR: ${{ steps.setup-uv.outputs.uv_dir }}
         # The interpreter the step above set up, named outright so uv
         # builds the environment from it rather than from whatever else
         # it might discover on the runner.
@@ -323,6 +373,8 @@ runs:
       run: |
         # Install github2gerrit from this action's own checkout
         set -euo pipefail
+        export PATH="${UV_DIR}:${PATH}"
+        test "$(command -v uv)" = "${UV_DIR}/uv"
         uv --version
 
         # The tool installs from the tree the runner fetched for this
@@ -337,7 +389,12 @@ runs:
         # between jobs on a self-hosted runner and could hand a later
         # run an earlier install or a cached artefact), and not another
         # invocation of this action in the same job, whose files a
-        # merging copy would otherwise leave behind.
+        # merging copy would otherwise leave behind. No cache carries
+        # over either, here or in the uv step above: a cache hit is not
+        # hashed again, so a cache restored from elsewhere could hand
+        # the install an artefact the lockfile never verified. Every
+        # run downloads the locked wheels in full; that cost is
+        # accepted, not an oversight to optimise away.
         #
         # Not in place, because the reusable workflow checks this
         # action out beneath the caller's repository on push events,

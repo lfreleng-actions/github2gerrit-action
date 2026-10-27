@@ -10,6 +10,7 @@ from unittest.mock import patch
 import pytest
 
 from github2gerrit.cli import _check_automation_only
+from github2gerrit.cli import _gate_single_pr
 from github2gerrit.models import GitHubContext
 
 
@@ -224,6 +225,60 @@ class TestAutomationOnly:
         assert exc.value.code == 0
         mock_close_pr.assert_not_called()
 
+    @patch("github2gerrit.github_api.close_pr")
+    def test_an_unresolved_pull_request_is_rejected(
+        self, mock_close_pr: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No pull request object fails closed, as a missing author does.
+
+        The approval gate already refuses a pull request it could not
+        resolve; this gate matches it rather than treating the absence
+        as a pass. Nothing is closed, since there is nothing to close.
+        """
+        monkeypatch.setenv("AUTOMATION_ONLY", "true")
+        monkeypatch.delenv("G2G_SWEEP_LEG", raising=False)
+
+        gh = GitHubContext(
+            event_name="pull_request_target",
+            event_action="opened",
+            event_path=None,
+            repository="owner/repo",
+            repository_owner="owner",
+            server_url="https://github.com",
+            run_id="123",
+            sha="abc123",
+            base_ref="main",
+            head_ref="feature",
+            pr_number=1,
+        )
+
+        with pytest.raises(SystemExit) as exc:
+            _check_automation_only(None, gh)
+        assert exc.value.code == 1
+        mock_close_pr.assert_not_called()
+
+    def test_an_unresolved_pull_request_passes_when_disabled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With the gate off there is nothing to fail closed."""
+        monkeypatch.setenv("AUTOMATION_ONLY", "false")
+
+        gh = GitHubContext(
+            event_name="pull_request_target",
+            event_action="opened",
+            event_path=None,
+            repository="owner/repo",
+            repository_owner="owner",
+            server_url="https://github.com",
+            run_id="123",
+            sha="abc123",
+            base_ref="main",
+            head_ref="feature",
+            pr_number=1,
+        )
+
+        _check_automation_only(None, gh)
+
     @pytest.mark.parametrize(
         "login",
         ["dependabot[bot]", "pre-commit-ci[bot]", "Copilot"],
@@ -339,3 +394,70 @@ class TestAutomationOnly:
         ]
         for line in expected_lines:
             assert line in comment
+
+
+class TestTheGateRunsWithoutAToken:
+    """The single-PR path cannot skip the gate for want of a token.
+
+    The display step applies the gate once it holds the pull request,
+    but its no-token branch returns before that. The gate has to be
+    applied on that branch too, else a direct run or a caller that
+    passes no ``GITHUB_TOKEN`` would fetch and push with the gate never
+    consulted.
+    """
+
+    def _gate(self, displayed: Any, resolved: Any) -> tuple[MagicMock, Any]:
+        gh = GitHubContext(
+            event_name="pull_request_target",
+            event_action="opened",
+            event_path=None,
+            repository="owner/repo",
+            repository_owner="owner",
+            server_url="https://github.com",
+            run_id="123",
+            sha="abc123",
+            base_ref="main",
+            head_ref="feature",
+            pr_number=1,
+        )
+        with (
+            patch(
+                "github2gerrit.cli._extract_and_display_pr_info",
+                return_value=displayed,
+            ),
+            patch(
+                "github2gerrit.cli._resolve_pr_for_gate",
+                return_value=resolved,
+            ),
+            patch("github2gerrit.cli._check_automation_only") as gate,
+            patch("github2gerrit.cli._recover_pr_metadata", return_value=gh),
+            patch(
+                "github2gerrit.cli._check_fork_approval",
+                return_value=(True, ""),
+            ),
+        ):
+            result = _gate_single_pr(gh, MagicMock(), MagicMock())
+        return gate, result
+
+    def test_the_fallback_applies_the_gate_to_what_it_resolved(
+        self,
+    ) -> None:
+        resolved = MagicMock()
+        gate, result = self._gate(displayed=None, resolved=resolved)
+        gate.assert_called_once()
+        assert gate.call_args[0][0] is resolved
+        assert result[1] is resolved
+
+    def test_the_fallback_applies_the_gate_to_nothing_at_all(self) -> None:
+        # Resolving fails without a token; the gate then fails closed.
+        gate, _result = self._gate(displayed=None, resolved=None)
+        gate.assert_called_once()
+        assert gate.call_args[0][0] is None
+
+    def test_a_displayed_pull_request_is_not_gated_twice(self) -> None:
+        # The display step applied the gate before returning; a second
+        # pass here would be another API round for the same answer.
+        displayed = MagicMock()
+        gate, result = self._gate(displayed=displayed, resolved=None)
+        gate.assert_not_called()
+        assert result[1] is displayed

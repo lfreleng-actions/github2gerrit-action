@@ -211,7 +211,7 @@ forwarded setting treats blank as unset and keeps its documented default.
 | `GERRIT_HTTP_USER`               | unset                                       | Username for the Gerrit REST API (when required)                                  |
 | `GERRIT_HTTP_PASSWORD`           | unset                                       | HTTP password/token for the Gerrit REST API                                       |
 | `GERRIT_HTTP_BASE_PATH`          | unset                                       | Gerrit REST base path for non-standard deployments (e.g., `/r`)                   |
-| `GITHUB_TOKEN`                   | unset                                       | GitHub API token; required for PR queries, comments, and closing PRs              |
+| `GITHUB_TOKEN`                   | unset                                       | GitHub API token for PR queries, comments, closing PRs and the author gate        |
 | `GH_TOKEN`                       | unset                                       | Fallback source for `GITHUB_TOKEN` when the latter is unset                       |
 | `GERRIT_CHANGE_URL`              | unset                                       | Gerrit change URL for Gerrit-event dispatch mode (close the source PR)            |
 | `GERRIT_EVENT_TYPE`              | unset                                       | Gerrit event type for dispatch mode (`change-merged` or `change-abandoned`)       |

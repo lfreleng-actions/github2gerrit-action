@@ -7,8 +7,10 @@ request. A repository that accepts no outside contribution through
 GitHub has no use for that path, and every piece of it — resolving the
 pull request, reading its reviews, holding the Gerrit key on a runner
 for it — is surface that policy can simply remove. These tests pin
-that removal at both places it happens: the tool, and the reusable
-workflow's job condition.
+that removal in the tool, and pin that the reusable workflow still
+starts the job for a fork pull request with the policy set: the
+refusal is where the contributor gets an answer, and the job is how
+the tool gets to give one.
 """
 
 from __future__ import annotations
@@ -266,37 +268,36 @@ def _target(head_repo: str | None, skip_forks: bool) -> dict[str, Any]:
     return context
 
 
-class TestTheJobDoesNotStartForAFork:
-    """With SKIP_FORKS the credentials never reach a runner for one."""
+class TestTheJobStillStartsForAFork:
+    """The setting reaches the tool; it does not stop the job.
+
+    pull_request_target on a fork head is the one trigger a
+    contributor's own pull request fires, so it is the run that has to
+    answer them: the author gate closes a human-authored pull request
+    with a comment, and the fork policy leaves its notice. Skipping the
+    job would keep the key off the runner for that run and leave the
+    pull request open in silence; the tool refuses before any fetch
+    and before the key is materialised instead, as on every route.
+    """
 
     def _runs(self, jobs: dict[str, Any], context: dict[str, Any]) -> bool:
         return _truthy(_evaluate(jobs["github2gerrit"]["if"], context))
 
-    def test_a_fork_head_is_skipped(self, jobs: dict[str, Any]) -> None:
-        assert not self._runs(jobs, _target("someone/" + REPO, True))
+    def test_a_fork_head_runs_with_the_setting(
+        self, jobs: dict[str, Any]
+    ) -> None:
+        assert self._runs(jobs, _target("someone/" + REPO, True))
 
-    def test_a_deleted_fork_is_skipped(self, jobs: dict[str, Any]) -> None:
+    def test_a_deleted_fork_runs_with_the_setting(
+        self, jobs: dict[str, Any]
+    ) -> None:
         # GitHub reports no head repository for a deleted fork; the
-        # tool would treat that as untrusted, and so does the job.
-        assert not self._runs(jobs, _target(None, True))
-
-    def test_a_same_repository_head_still_runs(
-        self, jobs: dict[str, Any]
-    ) -> None:
-        assert self._runs(jobs, _target(REPO, True))
-
-    def test_without_the_setting_a_fork_still_runs(
-        self, jobs: dict[str, Any]
-    ) -> None:
-        # pull_request_target on a fork head is the trigger that
-        # applies the approval gate; the default keeps it.
-        assert self._runs(jobs, _target("someone/" + REPO, False))
+        # tool treats that as untrusted and refuses it with the notice.
+        assert self._runs(jobs, _target(None, True))
 
     def test_a_comment_re_check_still_reaches_the_tool(
         self, jobs: dict[str, Any]
     ) -> None:
-        # The payload names no head repository, so the job cannot
-        # decide; the tool does, and leaves a notice.
         context = {
             "github.event_name": "issue_comment",
             "github.event.issue.number": 29,
@@ -316,14 +317,21 @@ class TestTheJobDoesNotStartForAFork:
             )
             assert step["with"]["SKIP_FORKS"] == "${{ inputs.SKIP_FORKS }}"
 
-    def test_nothing_else_about_the_condition_moved(
+    def test_the_condition_does_not_read_the_setting(
         self, jobs: dict[str, Any]
     ) -> None:
-        # The clause is a pure restriction: every context that ran
-        # before still runs with the setting off.
+        # Every context runs the same with the setting on or off: the
+        # decision is the tool's, where the notice can be left.
+        assert "SKIP_FORKS" not in jobs["github2gerrit"]["if"]
         for context in (
             {"github.event_name": "push"},
             _target(REPO, False),
             _target("someone/" + REPO, False),
+            _target(None, False),
         ):
+            with_setting: dict[str, Any] = {
+                **context,
+                "inputs.SKIP_FORKS": True,
+            }
             assert self._runs(jobs, copy.deepcopy(context))
+            assert self._runs(jobs, with_setting)

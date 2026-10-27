@@ -257,6 +257,25 @@ def _check_automation_only(
         "pre-commit-ci[bot]",
     ]
 
+    if pr_obj is None:
+        # Fail closed, as the approval gate does: a pull request that
+        # could not be resolved has no author to check. The single-PR
+        # path reaches here only without a token, as any other failure
+        # to fetch the pull request exits before the gate. On a public
+        # repository the fallback resolve succeeds unauthenticated, so
+        # a direct run that lands here is on a private one, where the
+        # answer is a token, or AUTOMATION_ONLY=false when the gate is
+        # not meant to apply to the operator at the keyboard.
+        log.error(
+            "PR #%s rejected - the pull request could not be resolved to "
+            "check its author while AUTOMATION_ONLY is enabled. Provide "
+            "GITHUB_TOKEN so the author can be read, or set "
+            "AUTOMATION_ONLY=false (--no-automation-only) if this gate "
+            "is not meant to apply to this run",
+            gh.pr_number,
+        )
+        sys.exit(0 if _is_sweep_leg() else 1)
+
     pr_user = getattr(pr_obj, "user", None)
     pr_author = getattr(pr_user, "login", "")
     pr_author_type = getattr(pr_user, "type", "")
@@ -1260,6 +1279,22 @@ def _maybe_exit_for_version_or_disabled(version_flag: bool) -> None:
         sys.exit(int(ExitCode.SUCCESS))
 
 
+def _set_on_command_line(ctx: typer.Context, param_name: str) -> bool:
+    """Report whether the command line, not a default or env, set an option.
+
+    Compares by member name rather than by identity with a
+    ParameterSource member. typer vendors its own copy of click under
+    typer._click from 0.26 onward, so there ctx.get_parameter_source
+    returns a typer._click.core.ParameterSource member, which never
+    compares equal to the click.core.ParameterSource member of the
+    same name. Below 0.26 typer uses the installed click and the two
+    do match, which is why this arrived as a typer upgrade rather than
+    a code change. Matching on .name is correct under both.
+    """
+    source = ctx.get_parameter_source(param_name)  # pyright: ignore[reportAttributeAccessIssue]
+    return source is not None and source.name == "COMMANDLINE"
+
+
 def _resolve_bool_override(
     ctx: typer.Context, param_name: str, env_var: str, current: bool
 ) -> bool:
@@ -1270,16 +1305,7 @@ def _resolve_bool_override(
     env-var override is only applied when the parameter was NOT explicitly
     provided on the command line, so CLI flags always take precedence.
     """
-    source = ctx.get_parameter_source(param_name)  # pyright: ignore[reportAttributeAccessIssue]
-    # Compare by member name rather than by identity with a
-    # ParameterSource member. typer vendors its own copy of click under
-    # typer._click from 0.26 onward, so there ctx.get_parameter_source
-    # returns a typer._click.core.ParameterSource member, which never
-    # compares equal to the click.core.ParameterSource member of the
-    # same name. Below 0.26 typer uses the installed click and the two
-    # do match, which is why this arrived as a typer upgrade rather than
-    # a code change. Matching on .name is correct under both.
-    if source is not None and source.name == "COMMANDLINE":
+    if _set_on_command_line(ctx, param_name):
         return current
     env_val = os.getenv(env_var)
     if env_val is not None:
@@ -1315,8 +1341,7 @@ def _export_bool_if_explicit(
     policy that file states. An environment value already present is
     left as it is, since the consumer parses it directly.
     """
-    source = ctx.get_parameter_source(param_name)  # pyright: ignore[reportAttributeAccessIssue]
-    if source is not None and source.name == "COMMANDLINE":
+    if _set_on_command_line(ctx, param_name):
         os.environ[env_var] = "true" if current else "false"
 
 
@@ -3747,6 +3772,12 @@ def _gate_single_pr(
     # token cannot skip the gate.
     if pr_obj is None:
         pr_obj = _resolve_pr_for_gate(gh, data)
+        # The display step applies the automation gate itself, but
+        # only once it holds the pull request, and its no-token
+        # branch returns before that. Apply it to whatever was
+        # resolved here, nothing included, so a missing token cannot
+        # skip this gate any more than the approval gate below.
+        _check_automation_only(pr_obj, gh, progress_tracker)
 
     # Second chance at the pull request's own metadata, and a
     # second look at the short-circuit above. An issue_comment

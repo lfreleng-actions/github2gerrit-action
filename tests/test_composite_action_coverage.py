@@ -725,7 +725,7 @@ class TestPerformanceConsiderations:
         assert inputs["FETCH_DEPTH"]["default"] == "10"
 
     def test_python_caching(self, action_tester):
-        """Test that dependency management uses uv with built-in caching."""
+        """Nothing is cached: every artefact is hash-verified on download."""
         # Check that Python setup does NOT use pip caching (since we use uv)
         python_step = None
         for step in action_tester.action_config["runs"]["steps"]:
@@ -736,7 +736,9 @@ class TestPerformanceConsiderations:
         assert python_step is not None
         assert "cache" not in python_step.get("with", {})
 
-        # Check that uv setup step exists (provides its own caching)
+        # uv is installed from the lockfile's own entry by a shell step,
+        # under --require-hashes and with no pip cache; no action
+        # fetches it from a release, and no cache is restored for it.
         uv_step = None
         for step in action_tester.action_config["runs"]["steps"]:
             if step.get("name") == "Setup uv":
@@ -744,7 +746,9 @@ class TestPerformanceConsiderations:
                 break
 
         assert uv_step is not None
-        assert uv_step["uses"].startswith("astral-sh/setup-uv@")
+        assert "uses" not in uv_step
+        assert "--require-hashes" in uv_step["run"]
+        assert "--no-cache-dir" in uv_step["run"]
 
     def test_uv_package_manager(self, action_tester):
         """Test UV package manager is used for fast installations."""
@@ -793,7 +797,7 @@ class TestFullWorkflow:
             s for s in steps if "shell" in s and s["shell"] == "bash"
         ]
 
-        assert len(action_steps) >= 2  # Python, uv
+        assert len(action_steps) >= 2  # Checkout, Python
         assert len(shell_steps) >= 4  # Various validation and processing steps
 
     @pytest.mark.integration

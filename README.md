@@ -432,8 +432,9 @@ design.
 - Pin the action or reusable workflow to a commit SHA. That pin covers
   everything that runs with the Gerrit key: the action installs the
   tool from its own checkout, every dependency version comes from the
-  lockfile at that commit (build-time ones included), and `uv` itself
-  is the release the lockfile names. Dependabot keeps the lockfile
+  lockfile at that commit (build-time ones included) and matches the
+  hash recorded there, and `uv` itself comes from the same lockfile
+  entry under the same hash check. Dependabot keeps the lockfile
   current, so nothing needs a manual bump after a release.
 - Do not check the pull request head out in the calling workflow. Pull
   request runs need no checkout: the tool fetches the head into a
@@ -447,10 +448,8 @@ design.
 - Set `SKIP_FORKS: true` on a repository that takes no outside
   contributions through GitHub. It refuses every pull request whose
   head is not in the repository, whatever its reviews say, before any
-  fetch and before it unlocks the Gerrit key. With the reusable
-  workflow, a `pull_request_target` event showing a fork head starts
-  no job at all; a comment re-check, a dispatch naming the pull
-  request, or a sweep still runs and the tool refuses there. See
+  fetch and before it unlocks the Gerrit key, and leaves one notice on
+  the pull request pointing the contributor at Gerrit. See
   [refusing fork pull requests](docs/features.md#refusing-fork-pull-requests).
 - SSH handling is non-invasive: the tool creates temporary SSH files
   in the workspace without modifying user SSH configuration or keys,

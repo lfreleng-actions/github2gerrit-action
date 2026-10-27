@@ -13,9 +13,11 @@ import copy
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import textwrap
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -913,13 +915,24 @@ class TestActionStepValidation:
 
         The first sync pass refuses to build from source, so a runtime
         or build dependency without a Linux wheel for the pinned minor
-        fails every run. Checked here, for both runner architectures,
-        so moving the pin or updating the lockfile shows the
-        consequence before a caller does. Source-only distributions
-        are excluded: the second pass builds those deliberately.
+        fails every run; so does uv itself, which the bootstrap installs
+        wheels only from its lockfile entry. Checked here, for both
+        runner architectures, so moving the pin or updating the
+        lockfile shows the consequence before a caller does.
+        Source-only distributions are excluded: the second pass builds
+        those deliberately.
+
+        The closure is the one the install step syncs, no wider: a
+        package's extras are followed only where a dependency asks for
+        them, and an entry whose marker does not hold for the pinned
+        Python on Linux is left out. Walking every extra and ignoring
+        markers would demand a wheel for the dev tooling, or for a
+        Windows-only dependency, and fail a lockfile update that is
+        fine for the runner.
         """
         import tomllib
 
+        from packaging.markers import Marker
         from packaging.tags import compatible_tags
         from packaging.tags import cpython_tags
         from packaging.utils import parse_wheel_filename
@@ -927,25 +940,6 @@ class TestActionStepValidation:
         root = Path(__file__).parent.parent
         lock = tomllib.loads((root / "uv.lock").read_text())
         packages = {p["name"]: p for p in lock["package"]}
-
-        # The runtime closure plus the build group, as the install
-        # step syncs them.
-        project = packages["github2gerrit"]
-        pending = [d["name"] for d in project.get("dependencies", [])]
-        pending += [
-            d["name"]
-            for d in project.get("dev-dependencies", {}).get("build", [])
-        ]
-        closure: set[str] = set()
-        while pending:
-            name = pending.pop()
-            if name in closure:
-                continue
-            closure.add(name)
-            package = packages[name]
-            pending += [d["name"] for d in package.get("dependencies", [])]
-            for extra in package.get("optional-dependencies", {}).values():
-                pending += [d["name"] for d in extra]
 
         python_step = next(
             step
@@ -956,6 +950,39 @@ class TestActionStepValidation:
             int(part)
             for part in python_step["with"]["python-version"].split(".")
         )
+
+        def closure_for(environment: dict[str, str]) -> set[str]:
+            """The runtime closure, the build group and uv, as installed."""
+
+            def wanted(
+                entries: list[dict[str, Any]],
+            ) -> list[tuple[str, tuple[str, ...]]]:
+                return [
+                    (entry["name"], tuple(entry.get("extra", [])))
+                    for entry in entries
+                    if "marker" not in entry
+                    or Marker(entry["marker"]).evaluate(environment)
+                ]
+
+            project = packages["github2gerrit"]
+            pending = wanted(project.get("dependencies", []))
+            groups = project.get("dev-dependencies", {})
+            pending += wanted(groups.get("build", []))
+            pending += wanted(groups.get("toolchain", []))
+            seen: set[tuple[str, tuple[str, ...]]] = set()
+            while pending:
+                item = pending.pop()
+                if item in seen:
+                    continue
+                seen.add(item)
+                name, extras = item
+                package = packages[name]
+                pending += wanted(package.get("dependencies", []))
+                optional = package.get("optional-dependencies", {})
+                for extra in extras:
+                    pending += wanted(optional.get(extra, []))
+            return {name for name, _extras in seen}
+
         platforms = {
             "x86_64": [
                 "manylinux_2_28_x86_64",
@@ -971,6 +998,27 @@ class TestActionStepValidation:
             ],
         }
         for arch, plats in platforms.items():
+            # The runner as a marker environment: CPython at the pinned
+            # minor, on Linux, on this architecture.
+            environment = {
+                "implementation_name": "cpython",
+                "implementation_version": f"{major}.{minor}.0",
+                "os_name": "posix",
+                "platform_machine": arch,
+                "platform_python_implementation": "CPython",
+                "platform_release": "",
+                "platform_system": "Linux",
+                "platform_version": "",
+                "python_full_version": f"{major}.{minor}.0",
+                "python_version": f"{major}.{minor}",
+                "sys_platform": "linux",
+                "extra": "",
+            }
+            closure = closure_for(environment)
+            # The dev tooling is never synced by the install step, so a
+            # walk that reached it would be checking the wrong thing.
+            assert "pytest" not in closure
+            assert "uv" in closure
             tags = set(cpython_tags((major, minor), platforms=plats))
             tags |= set(compatible_tags((major, minor), platforms=plats))
             missing = sorted(
@@ -991,25 +1039,156 @@ class TestActionStepValidation:
             )
 
     def test_uv_setup_step(self, action_config):
-        """Test uv setup step configuration."""
+        """uv comes from the lockfile, hash-verified, like everything else.
+
+        A GitHub release archive is verified against a checksum
+        published beside it, which says only that the two were
+        published together. The lockfile's wheel hashes say which bytes
+        this commit expects, so the step hands pip the lockfile's own
+        entry under --require-hashes: wheels only, no dependencies, the
+        lockfile's index, and the caller's pip configuration ignored.
+        """
         steps = action_config["runs"]["steps"]
         uv_step = next(
             (step for step in steps if step.get("name") == "Setup uv"), None
         )
 
         assert uv_step is not None
-        assert uv_step["uses"].startswith("astral-sh/setup-uv@")
-
-        # The uv release is pinned by the lockfile shipped at this
-        # commit, read from the action's own checkout; left to its
-        # defaults setup-uv consults the caller's workspace, which a
-        # caller may have filled with a pull request head.
-        with_config = uv_step["with"]
-        assert with_config["version-file"] == (
-            "${{ github.action_path }}/uv.lock"
+        assert "uses" not in uv_step
+        assert uv_step["id"] == "setup-uv"
+        assert uv_step["shell"] == "bash"
+        # The interpreter the Python step set up, not whatever python3
+        # the runner finds first.
+        assert uv_step["env"]["PYTHON"] == (
+            "${{ steps.setup-python.outputs.python-path }}"
         )
-        assert with_config["working-directory"] == "${{ github.action_path }}"
-        assert "version" not in with_config
+
+        script = uv_step["run"]
+        assert "set -euo pipefail" in script
+        assert '"${GITHUB_ACTION_PATH}/uv.lock"' in script
+        assert "import tomllib" in script
+        assert "--index-url {entry['source']['registry']}" in script
+        for flag in (
+            "--isolated",
+            "--require-hashes",
+            "--only-binary :all:",
+            "--no-deps",
+            "--no-cache-dir",
+        ):
+            assert flag in script, flag
+        # Its own fresh directory under runner.temp, like the install;
+        # Python runs from there and in isolated mode, so nothing in the
+        # caller's checkout (the working directory on push events) or
+        # on PYTHONPATH can shadow the modules the bootstrap uses.
+        assert (
+            'base="$(mktemp -d "${RUNNER_TEMP}/github2gerrit-uv.XXXXXX")"'
+        ) in script
+        assert 'cd "${base}"' in script
+        assert '"${PYTHON}" -I - ' in script
+        assert '"${PYTHON}" -I -m venv' in script
+        assert '"${base}/venv/bin/python" -I -m pip --isolated' in script
+        assert 'echo "uv_dir=${base}/venv/bin" >> "$GITHUB_OUTPUT"' in script
+
+        # No step fetches uv from anywhere else.
+        assert not any(
+            "setup-uv" in str(step.get("uses", "")) for step in steps
+        )
+
+    def test_the_uv_bootstrap_installs_the_locked_release(self, action_config):
+        """Run the step's script against the real lockfile.
+
+        pip resolves the version from the requirements file the script
+        writes and verifies the download against the hashes in it, so
+        the script is run as far as that file and the file is checked:
+        the locked version, every wheel hash the lockfile records, the
+        lockfile's index, and nothing else. The install itself needs
+        the network, so a stub pip records the arguments it was given
+        instead.
+
+        It runs from a working directory holding a hostile tomllib.py,
+        named on PYTHONPATH as well, as a caller's checkout could on a
+        push event: the step has to write the file from the real
+        module regardless.
+        """
+        import tomllib
+
+        root = Path(__file__).parent.parent
+        lock = tomllib.loads((root / "uv.lock").read_text())
+        (entry,) = [p for p in lock["package"] if p["name"] == "uv"]
+
+        uv_step = next(
+            step
+            for step in action_config["runs"]["steps"]
+            if step.get("name") == "Setup uv"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            workspace = tmp_path / "workspace"
+            workspace.mkdir()
+            (workspace / "tomllib.py").write_text(
+                'raise SystemExit("shadowed by the workspace")\n'
+            )
+            # A stand-in interpreter: real for the heredoc that writes
+            # the requirements file, passing on the isolation flag it
+            # was given and nothing it was not; a recorder for `-m venv`
+            # and `-m pip`. The venv it "creates" holds the same
+            # stand-in as its python and a stub uv.
+            fake_python = tmp_path / "python"
+            fake_python.write_text(
+                textwrap.dedent(f"""\
+                    #!/usr/bin/env bash
+                    set -euo pipefail
+                    isolated=""
+                    if [[ "${{1:-}}" == -I ]]; then isolated=-I; shift; fi
+                    case "${{1:-}}" in
+                      -)
+                        exec {sys.executable} ${{isolated:+-I}} "$@" ;;
+                      -m)
+                        if [[ "$2" == venv ]]; then
+                          mkdir -p "$3/bin"
+                          cp "$0" "$3/bin/python"
+                          printf '#!/usr/bin/env bash\\necho uv stub\\n' \\
+                            > "$3/bin/uv"
+                          chmod +x "$3/bin/uv"
+                        else
+                          printf '%s\\n' "$@" >> "{tmp_path}/pip-args"
+                        fi ;;
+                    esac
+                    """)
+            )
+            fake_python.chmod(0o755)
+            output = tmp_path / "github_output"
+            output.touch()
+            result = subprocess.run(
+                ["bash", "-c", uv_step["run"]],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=60,
+                cwd=workspace,
+                env={
+                    **os.environ,
+                    "PYTHONPATH": str(workspace),
+                    "PYTHON": str(fake_python),
+                    "RUNNER_TEMP": str(tmp_path),
+                    "GITHUB_ACTION_PATH": str(root),
+                    "GITHUB_OUTPUT": str(output),
+                },
+            )
+            assert result.returncode == 0, result.stderr
+
+            pip_args = (tmp_path / "pip-args").read_text().split("\n")
+            requirements = Path(pip_args[pip_args.index("-r") + 1])
+            lines = requirements.read_text().split()
+            assert lines[0:2] == ["--index-url", entry["source"]["registry"]]
+            assert lines[2] == f"uv=={entry['version']}"
+            hashes = {w["hash"] for w in entry["wheels"]}
+            assert set(lines[3:]) - {"\\"} == {f"--hash={h}" for h in hashes}
+            assert entry["sdist"]["hash"] not in requirements.read_text()
+
+            uv_dir = output.read_text().strip().removeprefix("uv_dir=")
+            assert uv_dir.startswith(str(tmp_path / "github2gerrit-uv."))
+            assert (Path(uv_dir) / "uv").exists()
 
     def test_repository_checkout_restricted_to_push(self, action_config):
         """No checkout may place pull request head content in the runner.
@@ -1085,6 +1264,14 @@ class TestActionStepValidation:
         assert install_step["id"] == "setup-g2g"
 
         script = install_step["run"]
+        # The uv that runs is the one the bootstrap step installed from
+        # the lockfile, found through its own directory and checked to
+        # be the one PATH resolves, not whatever a runner carries.
+        assert install_step["env"]["UV_DIR"] == (
+            "${{ steps.setup-uv.outputs.uv_dir }}"
+        )
+        assert 'export PATH="${UV_DIR}:${PATH}"' in script
+        assert 'test "$(command -v uv)" = "${UV_DIR}/uv"' in script
         assert "uv --version" in script
         # The install runs from a directory made fresh per invocation
         # under runner.temp: the reusable workflow places this action

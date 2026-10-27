@@ -333,11 +333,12 @@ dev = [
     # cannot see dependency groups.
     "github2gerrit[dev]",
 ]
-# Nothing installs this group. It exists so that uv.lock carries an
-# exact uv release: action.yaml points setup-uv at the lockfile
-# (version-file) to install that release on the runner, and Dependabot's
-# uv ecosystem bumps the lock entry like any other dependency. A static
-# version in action.yaml would have no such upkeep.
+# Nothing installs this group through uv. It exists so that uv.lock
+# carries an exact uv release with its wheel hashes: action.yaml reads
+# that entry and installs it with pip under --require-hashes to put uv on
+# the runner, and Dependabot's uv ecosystem bumps the lock entry like any
+# other dependency. A static version in action.yaml would have no such
+# upkeep, and no hashes.
 toolchain = [
     "uv>=0.13.5",
 ]
