@@ -47,6 +47,10 @@ def _repository(tmp_path: Path) -> Path:
     work = tmp_path / "work"
     _git(tmp_path, "init", "-q", "--bare", str(gerrit))
     _git(tmp_path, "init", "-q", "-b", "master", str(work))
+    # The autouse fixture strips the SSH agent, so a developer whose
+    # global config signs commits with an agent-held key cannot commit
+    # here. Signing adds nothing to what this test checks.
+    _git(work, "config", "commit.gpgsign", "false")
     (work / ".gitreview").write_text(
         "[gerrit]\nhost=gerrit.example.org\nproject=example.git\n"
         "defaultbranch=master\n"
