@@ -54,7 +54,6 @@ HEAD_SHA = "0b2abdcf7bb2fb5ed6620f214968ae2b3c5e70e6"
 ACTION_STEP = "Run github2gerrit composite action"
 LEG_ONLY = {
     ("with", "PR_NUMBER"),
-    ("with", "USE_LOCAL_ACTION"),
     ("env", "G2G_SWEEP_LEG"),
 }
 """The action-step keys that make a sweep leg, and all that may differ."""
@@ -276,21 +275,19 @@ class TestTheLegIsTheSingleJob:
         assert step["with"]["PR_NUMBER"] == "${{ matrix.pr }}"
         assert step["env"]["G2G_SWEEP_LEG"] == "true"
 
-    def test_a_leg_runs_the_tool_from_this_workflows_commit(
+    def test_a_leg_does_not_choose_where_the_tool_comes_from(
         self, jobs: dict[str, Any]
     ) -> None:
-        # A tool older than the workflow ignores G2G_SWEEP_LEG, and the
-        # pr 0 leg would then sweep every pull request in one job while
-        # the other legs do the same. The PyPI release can lag.
+        # A leg depends on G2G_SWEEP_LEG, which a tool older than the
+        # workflow ignores. Legs once forced the tool to install from
+        # the workflow's own commit for that reason; every run now
+        # does, so a leg has nothing to say about it.
         step = _action_step(jobs["github2gerrit-sweep"])
-        assert step["with"]["USE_LOCAL_ACTION"] == "true"
+        assert "USE_LOCAL_ACTION" not in step.get("with", {})
 
     def test_the_single_job_is_never_a_leg(self, jobs: dict[str, Any]) -> None:
         step = _action_step(jobs["github2gerrit"])
         assert "G2G_SWEEP_LEG" not in step.get("env", {})
-        # Nor does it change where the tool comes from; that remains
-        # the published release for every other run.
-        assert "USE_LOCAL_ACTION" not in step.get("with", {})
 
 
 # ---------------------------------------------------------------------

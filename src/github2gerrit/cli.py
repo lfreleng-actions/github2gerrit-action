@@ -87,6 +87,7 @@ from .pr_approval import evaluate_fork_approval
 from .pr_approval import recorded_transfer
 from .pr_approval import render_blocked_comment
 from .pr_approval import render_cleared_comment
+from .pr_approval import render_forks_skipped_comment
 from .pr_approval import render_transferred_comment
 from .pr_commands import CMD_CHECK
 from .pr_commands import MENTION_PREFIX
@@ -247,32 +248,62 @@ def _check_automation_only(
         log.debug("AUTOMATION_ONLY disabled, accepting all PRs")
         return
 
-    # Known automation tools
+    # Known automation tools. Each is a GitHub App, so its pull requests
+    # come from a Bot account; the login alone is not the test, since
+    # that would rest on GitHub keeping the name reserved.
     known_automation_tools = [
         "Copilot",
         "dependabot[bot]",
-        "dependabot",
         "pre-commit-ci[bot]",
-        "pre-commit-ci",
     ]
 
-    pr_author = getattr(getattr(pr_obj, "user", None), "login", "")
+    if pr_obj is None:
+        # Fail closed, as the approval gate does: a pull request that
+        # could not be resolved has no author to check. The single-PR
+        # path reaches here only without a token, as any other failure
+        # to fetch the pull request exits before the gate. On a public
+        # repository the fallback resolve succeeds unauthenticated, so
+        # a direct run that lands here is on a private one, where the
+        # answer is a token, or AUTOMATION_ONLY=false when the gate is
+        # not meant to apply to the operator at the keyboard.
+        log.error(
+            "PR #%s rejected - the pull request could not be resolved to "
+            "check its author while AUTOMATION_ONLY is enabled. Provide "
+            "GITHUB_TOKEN so the author can be read, or set "
+            "AUTOMATION_ONLY=false (--no-automation-only) if this gate "
+            "is not meant to apply to this run",
+            gh.pr_number,
+        )
+        sys.exit(0 if _is_sweep_leg() else 1)
+
+    pr_user = getattr(pr_obj, "user", None)
+    pr_author = getattr(pr_user, "login", "")
+    pr_author_type = getattr(pr_user, "type", "")
     if not pr_author:
-        log.warning("Unable to determine PR author, allowing PR to proceed")
-        return
+        # Fail closed: this gate is what keeps a mirror from relaying
+        # arbitrary pull requests to Gerrit. The pull request stays open
+        # for a person to look at, as the tool cannot say whose it is.
+        log.error(
+            "PR #%s rejected - unable to determine its author while "
+            "AUTOMATION_ONLY is enabled",
+            gh.pr_number,
+        )
+        sys.exit(0 if _is_sweep_leg() else 1)
 
     log.debug(
-        "Checking PR author '%s' against known automation tools",
+        "Checking PR author '%s' (%s) against known automation tools",
         pr_author,
+        pr_author_type or "unknown type",
     )
 
     # Check if author is in known automation tools list
-    if pr_author not in known_automation_tools:
+    if pr_author not in known_automation_tools or pr_author_type != "Bot":
         log.warning(
-            "PR #%s from '%s' rejected - only known automation tools "
+            "PR #%s from '%s' (%s) rejected - only known automation tools "
             "are accepted when AUTOMATION_ONLY is enabled",
             gh.pr_number,
             pr_author,
+            pr_author_type or "unknown type",
         )
 
         # Close PR with comment
@@ -602,7 +633,8 @@ def _check_fork_approval(
     already implies write access. Everything else — forks, and pull
     requests whose provenance could not be established — requires an
     approving review from a trusted maintainer, bound to the current
-    head commit.
+    head commit; or, when ``SKIP_FORKS`` is set, is turned away
+    outright, with nothing a review can do about it.
 
     Only a head positively known to live in the base repository skips
     the gate. Unknown provenance does not: `is_fork_pr` answers a
@@ -611,9 +643,10 @@ def _check_fork_approval(
     ``False`` in the same case. Using the latter keeps the gate closed
     when metadata is missing, which is exactly when it matters most.
 
-    The gate applies to unattended runs only. A direct CLI invocation
-    is a person acting deliberately with their own credentials, and
-    needs no second signature.
+    The approval gate applies to unattended runs only. A direct CLI
+    invocation is a person acting deliberately with their own
+    credentials, and needs no second signature. ``SKIP_FORKS`` is a
+    policy the operator stated, and applies wherever it is set.
 
     Runs before any fork content is fetched and before the Gerrit key
     is materialised, so a blocked pull request never reaches either.
@@ -626,10 +659,26 @@ def _check_fork_approval(
         worker clear or overwrite another's constraint.
 
         Blocking is not an error: the pull request is simply waiting
-        for a human, and a failed check would misrepresent that.
+        for a human, or is one this repository does not take, and a
+        failed check would misrepresent either.
     """
     if gh.head_is_trusted:
         return True, ""
+
+    if env_bool("SKIP_FORKS", False):
+        log.warning(
+            "🛑 Pull request #%s not transferred to Gerrit: SKIP_FORKS is "
+            "enabled and the head is not in this repository",
+            gh.pr_number,
+        )
+        safe_console_print(
+            "🛑 Fork pull requests are not transferred (SKIP_FORKS)",
+            style="yellow",
+            progress_tracker=progress_tracker,
+        )
+        if pr_obj is not None:
+            _post_forks_skipped_notice(pr_obj)
+        return False, ""
 
     if not _is_github_actions_context():
         # Direct CLI invocation. The operator chose this pull request
@@ -862,6 +911,26 @@ def _post_fork_approval_notice(
         create_pr_comment(pr_obj, body)
     except Exception as exc:
         log.debug("Could not post fork approval notice: %s", exc)
+
+
+def _post_forks_skipped_notice(pr_obj: Any) -> None:
+    """Tell the contributor the repository takes no fork pull requests.
+
+    Edits any prior notice rather than adding one per event, and is
+    best-effort for the same reason as the approval notice: a comment
+    API failure must not turn a refusal into a crash or a pass.
+    """
+    if env_bool("CI_TESTING", False):
+        return
+
+    body = render_forks_skipped_comment()
+    if _edit_owned_marker_comment(pr_obj, body):
+        return
+
+    try:
+        create_pr_comment(pr_obj, body)
+    except Exception as exc:
+        log.debug("Could not post SKIP_FORKS notice: %s", exc)
 
 
 def _extract_and_display_pr_info(
@@ -1210,6 +1279,22 @@ def _maybe_exit_for_version_or_disabled(version_flag: bool) -> None:
         sys.exit(int(ExitCode.SUCCESS))
 
 
+def _set_on_command_line(ctx: typer.Context, param_name: str) -> bool:
+    """Report whether the command line, not a default or env, set an option.
+
+    Compares by member name rather than by identity with a
+    ParameterSource member. typer vendors its own copy of click under
+    typer._click from 0.26 onward, so there ctx.get_parameter_source
+    returns a typer._click.core.ParameterSource member, which never
+    compares equal to the click.core.ParameterSource member of the
+    same name. Below 0.26 typer uses the installed click and the two
+    do match, which is why this arrived as a typer upgrade rather than
+    a code change. Matching on .name is correct under both.
+    """
+    source = ctx.get_parameter_source(param_name)  # pyright: ignore[reportAttributeAccessIssue]
+    return source is not None and source.name == "COMMANDLINE"
+
+
 def _resolve_bool_override(
     ctx: typer.Context, param_name: str, env_var: str, current: bool
 ) -> bool:
@@ -1220,16 +1305,7 @@ def _resolve_bool_override(
     env-var override is only applied when the parameter was NOT explicitly
     provided on the command line, so CLI flags always take precedence.
     """
-    source = ctx.get_parameter_source(param_name)  # pyright: ignore[reportAttributeAccessIssue]
-    # Compare by member name rather than by identity with a
-    # ParameterSource member. typer vendors its own copy of click under
-    # typer._click from 0.26 onward, so there ctx.get_parameter_source
-    # returns a typer._click.core.ParameterSource member, which never
-    # compares equal to the click.core.ParameterSource member of the
-    # same name. Below 0.26 typer uses the installed click and the two
-    # do match, which is why this arrived as a typer upgrade rather than
-    # a code change. Matching on .name is correct under both.
-    if source is not None and source.name == "COMMANDLINE":
+    if _set_on_command_line(ctx, param_name):
         return current
     env_val = os.getenv(env_var)
     if env_val is not None:
@@ -1251,6 +1327,22 @@ def _apply_bool_env_overrides(
     for param_name, (current, env_var) in options.items():
         resolved = _resolve_bool_override(ctx, param_name, env_var, current)
         os.environ[env_var] = "true" if resolved else "false"
+
+
+def _export_bool_if_explicit(
+    ctx: typer.Context, param_name: str, env_var: str, current: bool
+) -> None:
+    """Export a boolean option only when the command line set it.
+
+    Unlike :func:`_apply_bool_env_overrides`, this leaves the variable
+    alone when the option is at its default: the per-organisation
+    configuration file is applied to the environment later, for keys
+    not already set, and exporting the default here would shadow a
+    policy that file states. An environment value already present is
+    left as it is, since the consumer parses it directly.
+    """
+    if _set_on_command_line(ctx, param_name):
+        os.environ[env_var] = "true" if current else "false"
 
 
 def _apply_netrc_options(
@@ -1787,6 +1879,15 @@ def main(
         envvar="AUTOMATION_ONLY",
         help="Accept pull requests from known automation tools.",
     ),
+    skip_forks: bool = typer.Option(
+        False,
+        "--skip-forks/--no-skip-forks",
+        envvar="SKIP_FORKS",
+        help=(
+            "Never transfer a pull request whose head is not in this "
+            "repository, whatever its reviews say."
+        ),
+    ),
     no_netrc: bool = typer.Option(
         False,
         "--no-netrc",
@@ -1851,6 +1952,9 @@ def main(
             "automation_only": (automation_only, "AUTOMATION_ONLY"),
         },
     )
+    # SKIP_FORKS is a policy a per-organisation configuration file may
+    # state, so its default is not exported; see _export_bool_if_explicit.
+    _export_bool_if_explicit(ctx, "skip_forks", "SKIP_FORKS", skip_forks)
 
     _apply_netrc_options(no_netrc, netrc_file, netrc_optional, gerrit_server)
     _configure_logging_and_progress(verbose, show_progress)
@@ -2211,7 +2315,8 @@ def _process_bulk_pr(
     try:
         _check_automation_only(pr, per_ctx, progress_tracker)
     except SystemExit:
-        # PR was rejected and closed, skip processing
+        # PR was rejected (and closed, when its author was known);
+        # skip processing
         log.debug("PR #%d rejected by automation_only check", pr_number)
         return "skipped", None, None
 
@@ -3667,6 +3772,12 @@ def _gate_single_pr(
     # token cannot skip the gate.
     if pr_obj is None:
         pr_obj = _resolve_pr_for_gate(gh, data)
+        # The display step applies the automation gate itself, but
+        # only once it holds the pull request, and its no-token
+        # branch returns before that. Apply it to whatever was
+        # resolved here, nothing included, so a missing token cannot
+        # skip this gate any more than the approval gate below.
+        _check_automation_only(pr_obj, gh, progress_tracker)
 
     # Second chance at the pull request's own metadata, and a
     # second look at the short-circuit above. An issue_comment

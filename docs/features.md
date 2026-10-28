@@ -344,13 +344,15 @@ processing to known automation tools. Use this for GitHub mirrors where
 contributors should submit changes via Gerrit, while still accepting
 automated dependency updates.
 
-Recognized automation tool usernames:
+Recognized automation tools. Each is a GitHub App, so the check
+requires the author to be a Bot account carrying one of these logins;
+a user account with the same name does not pass:
 
-| Tool           | GitHub Username(s)                    |
-| -------------- | ------------------------------------- |
-| Dependabot     | `dependabot[bot]`, `dependabot`       |
-| Pre-commit.ci  | `pre-commit-ci[bot]`, `pre-commit-ci` |
-| GitHub Copilot | `Copilot`                             |
+| Tool           | GitHub login         |
+| -------------- | -------------------- |
+| Dependabot     | `dependabot[bot]`    |
+| Pre-commit.ci  | `pre-commit-ci[bot]` |
+| GitHub Copilot | `Copilot`            |
 
 When enabled, the tool rejects PRs from other users by:
 
@@ -363,6 +365,12 @@ When enabled, the tool rejects PRs from other users by:
    ```
 
 3. Exiting with code 1.
+
+The tool also rejects a PR whose author it cannot read (exit code 1),
+but leaves it open: the gate fails closed, and the tool cannot say
+whose the PR is. A run with no `GITHUB_TOKEN` cannot resolve the PR at
+all, and the gate rejects it the same way rather than letting the run
+proceed unconsulted.
 
 Set `AUTOMATION_ONLY: "false"` to accept PRs from all users:
 
@@ -661,6 +669,40 @@ unreviewed commit into Gerrit.
 That refusal fails the run, unlike the ordinary blocked case, because it falls
 outside the normal course of events. The push that caused it triggers a fresh
 run, which asks for approval of the new commit in the usual way.
+
+### Refusing fork pull requests
+
+A repository that takes no outside contributions through GitHub has no use
+for the approval path at all. Set `SKIP_FORKS: true` and the tool refuses
+every pull request whose head is not in the repository — forks, and any whose
+origin it cannot establish — whatever its reviews say. The check sits where
+the approval gate does, ahead of any fetch and of the Gerrit key, and unlike
+the gate it applies to direct CLI runs too: the operator stated the policy,
+and an operator at the keyboard earns no exemption from their own rule.
+
+The refused pull request stays open, and the tool leaves one notice on it
+saying the repository does not transfer fork pull requests and pointing the
+contributor at Gerrit. The notice occupies the same comment the approval gate
+would edit, so a later event updates it rather than adding another.
+
+With the reusable workflow the job starts for such a pull request as for any
+other, and the tool refuses it there: on a `pull_request_target` event — the
+one trigger a contributor's own pull request fires — as much as on a comment
+re-check, a dispatch naming the pull request or a scheduled sweep. Skipping
+the job for a fork head would keep the Gerrit key off the runner for that
+run, at the price of leaving the pull request open with no notice; the tool
+exits before any fetch and before it unlocks the key instead, as on every
+route.
+
+A direct CLI run may take the setting from the per-organisation configuration
+file. Under GitHub Actions the file is not read (see
+[Configuration File](#configuration-file)), so the action input states the
+policy there, as it does for every other setting.
+
+The setting is independent of `AUTOMATION_ONLY`. A Gerrit mirror that
+receives only Dependabot and similar updates would set both: the author gate
+rejects a human-authored pull request, and the fork policy removes the
+approval path as an avenue regardless of who the author is.
 
 ## Duplicate Detection
 

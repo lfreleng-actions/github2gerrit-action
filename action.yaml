@@ -87,8 +87,10 @@ inputs:
     default: ""
   USE_LOCAL_ACTION:
     description: >-
-      Use local repository action/code instead of the PyPI package.
-      Set to 'true' when testing changes in a fork or branch before merging.
+      Deprecated and ignored. The action now always runs the tool from
+      its own checkout, so the commit a caller pins is the code that
+      runs; this input once selected that over the PyPI release. It is
+      kept so that callers still setting it are not broken.
     required: false
     default: "false"
   G2G_USE_SSH_AGENT:
@@ -170,6 +172,14 @@ inputs:
     description: "Only accept pull requests from known automation tools"
     required: false
     default: "true"
+  SKIP_FORKS:
+    description: >-
+      Never transfer a pull request whose head is not in this repository,
+      whatever its reviews say. Covers forks and any pull request whose
+      origin cannot be established. For repositories that take no
+      outside contributions through GitHub.
+    required: false
+    default: "false"
   CLEANUP_ABANDONED:
     description: "Close GitHub PRs when their Gerrit changes are abandoned"
     required: false
@@ -258,39 +268,213 @@ runs:
 
     - name: "Setup Python"
       if: steps.disabled-check.outputs.disabled != 'true'
+      id: setup-python
       # yamllint disable-line rule:line-length
       uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
       with:
-        python-version-file: '${{ github.action_path }}/pyproject.toml'
+        # A fixed minor, not the newest the runner offers. The install
+        # below accepts only wheels the lockfile names, so an
+        # interpreter newer than the lockfile's dependencies have
+        # wheels for would fail it; this is where that is decided, in
+        # one place. tests/test_action_step_validation.py checks that
+        # every runtime and build dependency in the lockfile has a
+        # Linux wheel for this minor, so moving the pin is a matter of
+        # changing it here and seeing the test pass.
+        python-version: '3.13'
 
     - name: "Setup uv"
       if: steps.disabled-check.outputs.disabled != 'true'
-      # yamllint disable-line rule:line-length
-      uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
-      with:
-        enable-cache: false
+      id: setup-uv
+      shell: bash
+      env:
+        PYTHON: ${{ steps.setup-python.outputs.python-path }}
+      run: |
+        # Install the locked uv release from its lockfile hashes
+        set -euo pipefail
+
+        # uv is a locked dependency like the rest: the `toolchain`
+        # dependency group in pyproject.toml exists to put its release
+        # in uv.lock, and Dependabot's uv ecosystem moves that pin like
+        # any other. It is installed from that entry rather than from a
+        # GitHub release. A release archive is verified against a
+        # checksum published beside it, which says only that the two
+        # were published together; the lockfile's wheel hashes say
+        # which bytes this commit expects. The entry is handed to pip
+        # with every hash it records, wheels only and no dependencies,
+        # so pip picks the wheel for the runner and refuses any file
+        # whose hash the lockfile does not carry. The index is the one
+        # the lockfile names, written into the requirements file so
+        # that neither the caller's pip configuration nor its
+        # environment can add another (--isolated ignores both); it
+        # can serve the locked bytes or fail, nothing else.
+        #
+        # Into a directory made fresh for this invocation under
+        # runner.temp, with no pip cache, for the reasons the install
+        # step below gives for its own environment and cache. Python
+        # runs from that directory and in isolated mode (-I): on push
+        # events the working directory is the caller's checkout, and a
+        # tomllib.py, venv/ or pip/ there would otherwise shadow the
+        # modules used here, since the interpreter puts its working
+        # directory first on sys.path; -I leaves it off, along with
+        # PYTHONPATH and the user site, which pip's --isolated does not
+        # cover.
+        base="$(mktemp -d "${RUNNER_TEMP}/github2gerrit-uv.XXXXXX")"
+        cd "${base}"
+        "${PYTHON}" -I - "${GITHUB_ACTION_PATH}/uv.lock" \
+          "${base}/requirements.txt" <<'PY'
+        import sys
+        import tomllib
+
+        lock_path, out_path = sys.argv[1:]
+        with open(lock_path, "rb") as fh:
+            lock = tomllib.load(fh)
+        (entry,) = [p for p in lock["package"] if p["name"] == "uv"]
+        lines = [
+            f"--index-url {entry['source']['registry']}",
+            f"uv=={entry['version']} \\",
+        ]
+        lines += [f"    --hash={w['hash']} \\" for w in entry["wheels"]]
+        lines[-1] = lines[-1].rstrip(" \\")
+        with open(out_path, "w") as fh:
+            fh.write("\n".join(lines) + "\n")
+        PY
+        "${PYTHON}" -I -m venv "${base}/venv"
+        "${base}/venv/bin/python" -I -m pip --isolated \
+          --disable-pip-version-check install --no-cache-dir \
+          --require-hashes --only-binary :all: --no-deps \
+          -r "${base}/requirements.txt"
+        "${base}/venv/bin/uv" --version
+        echo "uv_dir=${base}/venv/bin" >> "$GITHUB_OUTPUT"
 
     - name: "Setup github2gerrit"
       if: steps.disabled-check.outputs.disabled != 'true'
+      id: setup-g2g
       shell: bash
       env:
-        # Provide version for hatch-vcs (via setuptools-scm)
-        # when git metadata is unavailable
-        # GitHub Actions shallow checkout doesn't include .git history
-        SETUPTOOLS_SCM_PRETEND_VERSION: "0.0.0+dev"
-        USE_LOCAL_ACTION: ${{ inputs.USE_LOCAL_ACTION }}
+        ACTION_REF: ${{ github.action_ref }}
+        # The uv the step above installed from the lockfile; nothing
+        # else on the runner's PATH is consulted for it.
+        UV_DIR: ${{ steps.setup-uv.outputs.uv_dir }}
+        # The interpreter the step above set up, named outright so uv
+        # builds the environment from it rather than from whatever else
+        # it might discover on the runner.
+        UV_PYTHON: ${{ steps.setup-python.outputs.python-path }}
+        # Distributions the lockfile carries only as a source archive.
+        # uv would build each in an isolated environment whose build
+        # requirements it resolves afresh from the index, outside the
+        # lockfile; so they are installed in a second pass, without
+        # isolation, against the hash-verified build requirements the
+        # first pass put in place (setuptools and pbr are locked
+        # dependencies). tests/test_action_step_validation.py checks
+        # this list against the lockfile, so a dependency update that
+        # adds a source-only distribution fails there rather than
+        # quietly widening what a run fetches.
+        SDIST_ONLY: pygerrit2
       run: |
-        # Setup github2gerrit
+        # Install github2gerrit from this action's own checkout
         set -euo pipefail
+        export PATH="${UV_DIR}:${PATH}"
+        test "$(command -v uv)" = "${UV_DIR}/uv"
         uv --version
-        # Install locally for self-testing, use uvx for external repos
-        if [[ "${USE_LOCAL_ACTION}" == "true" ]] || \
-           [[ "${GITHUB_REPOSITORY}" =~ lfreleng-actions/github2gerrit-action ]]; then
-          echo "Installing with: uv pip install --system ${GITHUB_ACTION_PATH}"
-          uv pip install --system "${GITHUB_ACTION_PATH}"
-        else
-          echo "uvx will install GitHub2Gerrit from PyPI"
-        fi
+
+        # The tool installs from the tree the runner fetched for this
+        # action, so the commit a caller pins is the code that runs
+        # against Gerrit. Installing the PyPI release instead would run
+        # whatever is newest there, which the pin never covered.
+        #
+        # It installs from a copy of that tree, in a directory made
+        # fresh for this invocation under runner.temp, which also holds
+        # the environment and the uv cache. Nothing else shares it: not
+        # the caller's workspace, not the runner's home (which persists
+        # between jobs on a self-hosted runner and could hand a later
+        # run an earlier install or a cached artefact), and not another
+        # invocation of this action in the same job, whose files a
+        # merging copy would otherwise leave behind. No cache carries
+        # over either, here or in the uv step above: a cache hit is not
+        # hashed again, so a cache restored from elsewhere could hand
+        # the install an artefact the lockfile never verified. Every
+        # run downloads the locked wheels in full; that cost is
+        # accepted, not an oversight to optimise away.
+        #
+        # Not in place, because the reusable workflow checks this
+        # action out beneath the caller's repository on push events,
+        # and uv looks upward from a project for a workspace that
+        # claims it: a caller whose pyproject.toml declares one with a
+        # member glob that matches would have its own lockfile govern
+        # this install. runner.temp has no such ancestor.
+        base="$(mktemp -d "${RUNNER_TEMP}/github2gerrit.XXXXXX")"
+        src="${base}/src"
+        export UV_PROJECT_ENVIRONMENT="${base}/venv"
+        export UV_CACHE_DIR="${base}/uv-cache"
+        mkdir -p "${src}"
+        cp -R "${GITHUB_ACTION_PATH}/." "${src}/"
+
+        # Every dependency, build backend included, comes from the
+        # lockfile shipped at that same commit, and uv verifies each
+        # artefact against the hash the lockfile records; a version pin
+        # alone would still accept a new wheel added to a pinned
+        # release. Dependabot keeps the lockfile current; nothing here
+        # needs a bump when a release is cut. The project itself is
+        # left out of this step and installed below, once its version
+        # is known.
+        #
+        # The first pass accepts wheels only. Were a locked release to
+        # lack a wheel for the runner's Python, uv would otherwise build
+        # its source archive in an isolated environment resolved from
+        # the index, outside the lockfile; failing instead is the
+        # visible outcome, and a lockfile update, or moving the Python
+        # pin on the setup step above, the answer.
+        skip=()
+        isolate=()
+        for name in ${SDIST_ONLY}; do
+          skip+=(--no-install-package "${name}")
+          isolate+=(--no-build-isolation-package "${name}")
+        done
+        uv sync --directory "${src}" --frozen --no-build \
+          --no-dev --group build --no-install-project "${skip[@]}"
+        uv sync --directory "${src}" --frozen \
+          --no-dev --group build --no-install-project "${isolate[@]}"
+
+        # hatch-vcs takes the version from git metadata, which the
+        # runner's action download does not carry. Derive it from the
+        # ref the caller pinned, else from the checkout the reusable
+        # workflow makes, so the tool's banner names what runs: a
+        # release tag gives its version, a commit its abbreviated SHA.
+        version=""
+        for ref in "${ACTION_REF:-}" \
+          "$(git -C "${GITHUB_ACTION_PATH}" rev-parse HEAD 2>/dev/null || true)"
+        do
+          if [[ "${ref}" =~ ^v?([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            version="${BASH_REMATCH[1]}"
+            break
+          elif [[ "${ref}" =~ ^[0-9a-f]{40}$ ]]; then
+            version="0.0.0+g${ref:0:12}"
+            break
+          fi
+        done
+        export SETUPTOOLS_SCM_PRETEND_VERSION="${version:-0.0.0+dev}"
+        echo "Installing github2gerrit ${SETUPTOOLS_SCM_PRETEND_VERSION}" \
+          "from ${GITHUB_ACTION_PATH}"
+
+        # Build and install the package with the backend the lockfile
+        # supplied, in the environment it was installed to. Offline and
+        # without build isolation, so this step can fetch nothing: a
+        # build dependency the lockfile does not name fails here rather
+        # than being resolved from an index.
+        uv pip install --directory "${src}" \
+          --python "${UV_PROJECT_ENVIRONMENT}/bin/python" \
+          --offline --no-deps --no-build-isolation .
+
+        # The tool shells out to `git review`, which git resolves to a
+        # git-review executable on PATH. That executable has to be the
+        # locked one from this environment, not whatever a runner may
+        # carry globally, so the run step puts this directory first on
+        # PATH; check it is there to be found.
+        test -x "${UV_PROJECT_ENVIRONMENT}/bin/git-review"
+        {
+          echo "bin_dir=${UV_PROJECT_ENVIRONMENT}/bin"
+          echo "github2gerrit=${UV_PROJECT_ENVIRONMENT}/bin/github2gerrit"
+        } >> "$GITHUB_OUTPUT"
 
     - name: "Validate PR_NUMBER usage"
       # A scheduled sweep names its pull request the same way a dispatch
@@ -422,6 +606,7 @@ runs:
         G2G_INFO_YAML_MATCH_LFID: ${{ inputs.G2G_INFO_YAML_MATCH_LFID }}
         G2G_VERBOSE: ${{ inputs.VERBOSE }}
         AUTOMATION_ONLY: ${{ inputs.AUTOMATION_ONLY }}
+        SKIP_FORKS: ${{ inputs.SKIP_FORKS }}
         CLEANUP_ABANDONED: ${{ inputs.CLEANUP_ABANDONED }}
         CLEANUP_GERRIT: ${{ inputs.CLEANUP_GERRIT }}
         CREATE_MISSING: ${{ inputs.CREATE_MISSING }}
@@ -455,19 +640,18 @@ runs:
         PR_NUMBER: ${{ steps.extract.outputs.pr_number }}
         G2G_TEST_MODE: "false"
         G2G_NO_GERRIT: ${{ inputs.G2G_NO_GERRIT }}
-        USE_LOCAL_ACTION: ${{ inputs.USE_LOCAL_ACTION }}
+        GITHUB2GERRIT: ${{ steps.setup-g2g.outputs.github2gerrit }}
+        G2G_BIN_DIR: ${{ steps.setup-g2g.outputs.bin_dir }}
       run: |
         # Run github2gerrit Python CLI
         set -euo pipefail
-        # Use different invocation methods based on repository or USE_LOCAL_ACTION flag
-        if [[ "${USE_LOCAL_ACTION}" == "true" ]] || \
-           [[ "${GITHUB_REPOSITORY}" =~ lfreleng-actions/github2gerrit-action ]]; then
-          echo "Running:python -m github2gerrit.cli"
-          python -m github2gerrit.cli
-        else
-          echo "Running: uvx --from github2gerrit github2gerrit"
-          uvx --from github2gerrit github2gerrit
-        fi
+        # The executable the setup step installed from this action's
+        # own checkout; nothing is resolved or built with the Gerrit
+        # credential in scope. Its directory goes first on PATH so that
+        # `git review` finds the git-review installed beside it.
+        export PATH="${G2G_BIN_DIR}:${PATH}"
+        echo "Running: ${GITHUB2GERRIT}"
+        "${GITHUB2GERRIT}"
 
     - name: "Capture outputs"
       if: steps.disabled-check.outputs.disabled != 'true'

@@ -315,9 +315,16 @@ reportUntypedFunctionDecorator = "none"
 managed = true
 
 [dependency-groups]
-dev = [
+# The build backend, on its own so that action.yaml can install it
+# hash-verified from the lockfile alongside the runtime dependencies and
+# build the package without isolation, fetching nothing the lock does not
+# name.
+build = [
     "hatch-vcs>=0.5.0",
     "hatchling>=1.28.0",
+]
+dev = [
+    { include-group = "build" },
     # Pull in the dev extra defined above. uv installs the `dev` group by
     # default, so a bare `uv sync` provisions pytest and friends; without
     # this, `uv run pytest` silently falls through to whatever pytest sits
@@ -325,4 +332,13 @@ dev = [
     # installs the extra directly (`uv pip install ./[test,dev]`) and
     # cannot see dependency groups.
     "github2gerrit[dev]",
+]
+# Nothing installs this group through uv. It exists so that uv.lock
+# carries an exact uv release with its wheel hashes: action.yaml reads
+# that entry and installs it with pip under --require-hashes to put uv on
+# the runner, and Dependabot's uv ecosystem bumps the lock entry like any
+# other dependency. A static version in action.yaml would have no such
+# upkeep, and no hashes.
+toolchain = [
+    "uv>=0.13.5",
 ]

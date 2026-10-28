@@ -231,6 +231,9 @@ def test_multi_pr_url_mode_writes_aggregated_outputs(
         "G2G_TEST_MODE": "false",
         # Skip early DNS validation — tests mock the Gerrit layer
         "G2G_DRYRUN_DISABLE_NETWORK": "true",
+        # The dummy pull requests carry no author. The gate fails closed
+        # on that, and this test is about the outputs, not the gate.
+        "AUTOMATION_ONLY": "false",
         "GITHUB_OUTPUT": str(outputs_file),
     }
 
