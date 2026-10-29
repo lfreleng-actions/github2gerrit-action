@@ -1077,6 +1077,33 @@ back to environment variables. Credential priority order:
 1. CLI arguments (highest priority)
 2. `.netrc` file (unless disabled with `--no-netrc`)
 3. Environment variables (`GERRIT_HTTP_USER`, `GERRIT_HTTP_PASSWORD`)
+4. The file the `NETRC` environment variable names, as curl reads it, or
+   else `~/.netrc`, parsed with Python's `netrc` module: an entry without
+   `login` uses its `account`
+
+The Gerrit REST client uses only the credentials this order yields.
+Requests, which carries its calls through
+[python-gerrit-api](https://pypi.org/project/python-gerrit-api/), never
+adds credentials of its own from a `.netrc` file, not even on a
+redirect. A redirect to another host, or from HTTPS to HTTP, drops them.
+
+`--no-netrc` does not yet reach the Gerrit REST client, which still
+reads `.netrc` itself in the order above. `--netrc-file` reaches it only
+through the `GERRIT_HTTP_USER` and `GERRIT_HTTP_PASSWORD` values the CLI
+sets from that file when they are unset. Both gaps predate the move to
+python-gerrit-api.
+
+Gerrit REST calls verify TLS certificates against the CA bundle that
+Requests ships. To trust a private CA instead, point
+`REQUESTS_CA_BUNDLE`, or `CURL_CA_BUNDLE` when that is unset, at a PEM
+bundle or a hashed certificate directory; this also verifies an
+`https://` proxy. The calls honour `HTTP_PROXY`, `HTTPS_PROXY` and
+`NO_PROXY`, and fall back to `ALL_PROXY` for a scheme without a proxy
+of its own. `NO_PROXY` applies again after each redirect, and its
+network entries such as `10.0.0.0/8` or `fd00::/8` cover IPv4 and IPv6
+addresses. A request through an `https://` proxy starts with TLS to the
+proxy. A `socks5://` proxy needs PySocks, which the tool does not
+install, so such a request fails rather than connecting directly.
 
 ### Supersession Sweep Without REST Credentials
 
