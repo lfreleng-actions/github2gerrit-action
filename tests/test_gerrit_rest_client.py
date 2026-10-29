@@ -426,3 +426,92 @@ def test_warn_gerrit_credentials_unavailable_warns_once(
         if "credentials are not available" in rec.getMessage().lower()
     ]
     assert len(creds_warnings) == 1
+
+
+def _capture_requests(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+    """Route urllib through a stub that records each request it gets."""
+    monkeypatch.setattr(
+        "github2gerrit.gerrit_rest._PygerritRestApi", None, raising=True
+    )
+    monkeypatch.setattr("time.sleep", lambda s: None, raising=False)
+    requests: list[Any] = []
+
+    def _fake_urlopen(req: Any, timeout: float | None = None) -> _DummyResp:
+        requests.append(req)
+        return _DummyResp(status=200, payload=b")]}'\n{}")
+
+    monkeypatch.setattr(
+        "github2gerrit.gerrit_rest.urllib.request.urlopen",
+        _fake_urlopen,
+        raising=True,
+    )
+    return requests
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="authenticated requests do not yet use the /a/ prefix",
+)
+@pytest.mark.parametrize("method", ["get", "post", "put"])
+@pytest.mark.parametrize(
+    ("base_url", "expected"),
+    [
+        (
+            "https://gerrit.example.org/",
+            "https://gerrit.example.org/a/accounts/self",
+        ),
+        (
+            "https://gerrit.example.org/r/",
+            "https://gerrit.example.org/r/a/accounts/self",
+        ),
+    ],
+)
+def test_gerrit_rest_authenticated_requests_use_a_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+    method: str,
+    base_url: str,
+    expected: str,
+) -> None:
+    """Gerrit authenticates REST calls only beneath ``/a/``.
+
+    Without the prefix a server treats the call as anonymous, whatever
+    ``Authorization`` header it carries, so every method has to use it.
+    """
+    requests = _capture_requests(monkeypatch)
+    client = GerritRestClient(base_url=base_url, auth=("user", "secret"))
+
+    getattr(client, method)("/accounts/self")
+
+    assert [req.full_url for req in requests] == [expected]
+    assert requests[0].get_header("Authorization", "").startswith("Basic ")
+
+
+def test_gerrit_rest_a_prefix_is_not_doubled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A base URL that already ends in ``/a/`` is used as given."""
+    requests = _capture_requests(monkeypatch)
+    client = GerritRestClient(
+        base_url="https://gerrit.example.org/a/", auth=("user", "secret")
+    )
+
+    client.get("/accounts/self")
+
+    assert [req.full_url for req in requests] == [
+        "https://gerrit.example.org/a/accounts/self"
+    ]
+
+
+def test_gerrit_rest_anonymous_requests_omit_a_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without credentials the request goes to the plain REST path."""
+    requests = _capture_requests(monkeypatch)
+    client = GerritRestClient(base_url="https://gerrit.example.org/")
+
+    client.get("/accounts/self")
+
+    assert [req.full_url for req in requests] == [
+        "https://gerrit.example.org/accounts/self"
+    ]
+    assert requests[0].get_header("Authorization") is None
