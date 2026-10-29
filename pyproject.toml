@@ -44,9 +44,6 @@ dependencies = [
   # GitHub API client
   "PyGithub>=2.8.1",
 
-  # Gerrit REST client
-  "pygerrit2>=2.0.15",
-
   # Gerrit REST client, and the HTTP library it and GerritRestClient
   # share
   "python-gerrit-api>=3.1.0",
@@ -216,10 +213,6 @@ module = ["github2gerrit.*"]
 disallow_untyped_defs = true
 disallow_incomplete_defs = true
 disallow_untyped_calls = true
-
-[[tool.mypy.overrides]]
-module = ["pygerrit2"]
-ignore_missing_imports = true
 
 # python-gerrit-api ships no type information (no py.typed marker).
 [[tool.mypy.overrides]]

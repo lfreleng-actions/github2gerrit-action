@@ -416,7 +416,6 @@ source = { editable = "." }
 dependencies = [
     { name = "cryptography" },
     { name = "git-review" },
-    { name = "pygerrit2" },
     { name = "pygithub" },
     { name = "pynacl" },
     { name = "python-gerrit-api" },
@@ -463,7 +462,6 @@ requires-dist = [
     { name = "cryptography", specifier = ">=48.0.1" },
     { name = "git-review", specifier = ">=2.5.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.17.1" },
-    { name = "pygerrit2", specifier = ">=2.0.15" },
     { name = "pygithub", specifier = ">=2.8.1" },
     { name = "pynacl", specifier = ">=1.6.2" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.0.2" },
@@ -767,18 +765,6 @@ wheels = [
 ]
 
 [[package]]
-name = "pbr"
-version = "7.0.3"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "setuptools" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/5e/ab/1de9a4f730edde1bdbbc2b8d19f8fa326f036b4f18b2f72cfbea7dc53c26/pbr-7.0.3.tar.gz", hash = "sha256:b46004ec30a5324672683ec848aed9e8fc500b0d261d40a3229c2d2bbfcedc29", size = 135625, upload-time = "2025-11-03T17:04:56.274Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/c0/db/61efa0d08a99f897ef98256b03e563092d36cc38dc4ebe4a85020fe40b31/pbr-7.0.3-py2.py3-none-any.whl", hash = "sha256:ff223894eb1cd271a98076b13d3badff3bb36c424074d26334cd25aebeecea6b", size = 131898, upload-time = "2025-11-03T17:04:54.875Z" },
-]
-
-[[package]]
 name = "pluggy"
 version = "1.6.0"
 source = { registry = "https://pypi.org/simple" }
@@ -795,16 +781,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/fe/cf/d2d3b9f5699fb1e46
 wheels = [
     { url = "https://files.pythonhosted.org/packages/a0/e3/59cd50310fc9b59512193629e1984c1f95e5c8ae6e5d8c69532ccc65a7fe/pycparser-2.23-py3-none-any.whl", hash = "sha256:e5c6e8d3fbad53479cab09ac03729e0a9faf2bee3db8208a550daf5af81a5934", size = 118140, upload-time = "2025-09-09T13:23:46.651Z" },
 ]
-
-[[package]]
-name = "pygerrit2"
-version = "2.0.15"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "pbr" },
-    { name = "requests" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/73/6a/25fe59e806ff48d250c3da89f394897aa659da356107c2446453854decfa/pygerrit2-2.0.15.tar.gz", hash = "sha256:a18a057ec4d2b54ebbe2ce8457068f57609aa02d2dc94225e176d0c57a44f02a", size = 30652, upload-time = "2021-06-03T20:22:06.334Z" }
 
 [[package]]
 name = "pygithub"
