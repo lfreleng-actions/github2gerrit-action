@@ -6129,9 +6129,6 @@ class Orchestrator:
         """
         log.debug("Querying Gerrit for submitted change(s) via REST")
 
-        # pygerrit2 netrc filter is already applied in execute() unless
-        # verbose mode
-
         # Create centralized URL builder (auto-discovers base path)
         url_builder = create_gerrit_url_builder(gerrit.host)
 
@@ -7417,7 +7414,9 @@ class Orchestrator:
                 _ = client.get("/accounts/self")
                 log.debug("Gerrit REST authenticated access verified")
             else:
-                _ = client.get("/dashboard/self")
+                # /dashboard/self is a UI page that may answer with HTML;
+                # the server version is public JSON.
+                _ = client.get("/config/server/version")
                 log.debug("Gerrit REST endpoint reachable (unauthenticated)")
 
         except Exception as exc:

@@ -47,6 +47,11 @@ dependencies = [
   # Gerrit REST client
   "pygerrit2>=2.0.15",
 
+  # Gerrit REST client, and the HTTP library it and GerritRestClient
+  # share
+  "python-gerrit-api>=3.1.0",
+  "requests>=2.33.0",
+
   # git-review CLI used for pushing to Gerrit
   "git-review>=2.5.0",
 
@@ -214,6 +219,11 @@ disallow_untyped_calls = true
 
 [[tool.mypy.overrides]]
 module = ["pygerrit2"]
+ignore_missing_imports = true
+
+# python-gerrit-api ships no type information (no py.typed marker).
+[[tool.mypy.overrides]]
+module = ["gerrit"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

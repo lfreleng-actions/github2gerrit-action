@@ -10,7 +10,18 @@ with:
 - Transient error classification (HTTP 5xx/429 and common network errors)
 - Centralized URL handling via GerritUrlBuilder
 
-It prefers pygerrit2 when available and falls back to urllib otherwise.
+Requests go through python-gerrit-api, on a Requests session each client
+owns. Authenticated requests use Gerrit's ``/a/`` prefix, beneath which
+alone the server honours credentials. The client's own credentials, as
+the centralized resolver found them, are the only ones it sends:
+Requests' implicit netrc lookup is off, on redirects too. Requests drops
+those credentials on a redirect that leaves the host or downgrades HTTPS
+to HTTP, encodes request URLs, verifies TLS against
+``REQUESTS_CA_BUNDLE`` or ``CURL_CA_BUNDLE`` when one is set, and honours
+``HTTP_PROXY``, ``HTTPS_PROXY``, ``ALL_PROXY`` and ``NO_PROXY``. The
+session re-reads the proxy settings for each redirect, and a
+``NO_PROXY`` network such as ``fd00::/8`` also covers IPv6 addresses,
+which Requests matches for IPv4 alone.
 
 Usage:
     from github2gerrit.gerrit_rest import build_client_for_host
@@ -27,17 +38,23 @@ Design notes:
 
 from __future__ import annotations
 
-import base64
+import ipaddress
 import json
 import logging
-import urllib.error
+import os
 import urllib.parse
-import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from typing import Final
-from urllib.parse import urljoin
+
+import requests
+
+# python-gerrit-api, declared in pyproject.toml, installs as `gerrit`.
+# aislop-ignore-next-line hallucinated-import
+from gerrit import GerritClient
+from requests.adapters import HTTPAdapter
+from requests.auth import AuthBase
 
 from .external_api import ApiType
 from .external_api import RetryPolicy
@@ -50,19 +67,6 @@ from .utils import log_warning_once
 
 
 log = logging.getLogger("github2gerrit.gerrit_rest")
-
-# Optional pygerrit2 import
-try:  # pragma: no cover - exercised indirectly by tests that monkeypatch
-    from pygerrit2 import GerritRestAPI as _PygerritRestApi
-    from pygerrit2 import HTTPBasicAuth as _PygerritHttpAuth
-except Exception:  # pragma: no cover - absence path
-    _PygerritRestApi = None
-    _PygerritHttpAuth = None
-
-
-_MSG_PYGERRIT2_REQUIRED_AUTH: Final[str] = (
-    "pygerrit2 is required for HTTP authentication"
-)
 
 # HTTP status codes that indicate an authentication/authorization problem
 # rather than a transient fault or a bug. These are expected when no
@@ -83,14 +87,7 @@ def _is_auth_status(status: int | None) -> bool:
 
 
 def _extract_http_status(exc: BaseException) -> int | None:
-    """Best-effort extraction of an HTTP status code from an exception.
-
-    Handles both the urllib path (``urllib.error.HTTPError.code``) and the
-    pygerrit2/requests path (``HTTPError.response.status_code``).
-    """
-    code = getattr(exc, "code", None)
-    if isinstance(code, int):
-        return code
+    """Best-effort extraction of an HTTP status code from an exception."""
     response = getattr(exc, "response", None)
     status = getattr(response, "status_code", None)
     if isinstance(status, int):
@@ -115,6 +112,162 @@ def warn_gerrit_credentials_unavailable() -> None:
         "GERRIT_HTTP_PASSWORD (or a .netrc entry) to enable authenticated "
         "Gerrit REST access.",
     )
+
+
+def _in_no_proxy_network(host: str, no_proxy: str) -> bool:
+    """Return True if *host* is an IP address inside a NO_PROXY network.
+
+    Requests matches CIDR entries such as ``10.0.0.0/8`` for IPv4
+    addresses only, so an IPv6 entry such as ``fd00::/8`` would never
+    bypass the proxy without this check.
+    """
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    for raw_entry in no_proxy.split(","):
+        entry = raw_entry.strip()
+        if "/" not in entry:
+            continue
+        try:
+            network = ipaddress.ip_network(entry, strict=False)
+        except ValueError:
+            continue
+        if address.version == network.version and address in network:
+            return True
+    return False
+
+
+def _bypasses_proxy_by_network(url: str) -> bool:
+    """Return True if a ``NO_PROXY`` network covers the host of *url*.
+
+    Reads the variables as Requests does, the lowercase name first.
+    """
+    no_proxy = os.environ.get("no_proxy") or os.environ.get("NO_PROXY") or ""
+    host = urllib.parse.urlsplit(url).hostname or ""
+    return _in_no_proxy_network(host, no_proxy)
+
+
+class _NoCredentials(AuthBase):
+    """Send a request as it is.
+
+    Set on a request the client sends anonymously, so that Requests does
+    not look its host up in a netrc file and authenticate it after all.
+    """
+
+    def __call__(self, r: requests.PreparedRequest) -> requests.PreparedRequest:
+        return r
+
+
+def _raise_for_status(
+    response: requests.Response, *args: Any, **kwargs: Any
+) -> None:
+    """Raise HTTPError for a 4xx or 5xx response.
+
+    Runs before python-gerrit-api translates the status into exceptions
+    that drop it and the response along with it. A hook runs before
+    Requests reads the body, so the body is read here and the connection
+    released; otherwise each retry would open another connection while
+    this one stayed checked out. A body that cannot be read leaves the
+    HTTP error to report, and its connection is closed.
+    """
+    try:
+        response.raise_for_status()
+    except requests.HTTPError:
+        try:
+            _ = response.content
+        except Exception as exc:
+            log.debug(
+                "Could not read the body of HTTP %s: %s",
+                response.status_code,
+                exc,
+            )
+        finally:
+            response.close()
+        raise
+
+
+class _ProxyVerifyingAdapter(HTTPAdapter):
+    """Verify an https:// proxy that forwards a plain-HTTP request.
+
+    Requests verifies TLS only for https URLs, so it would reach such a
+    proxy over unverified TLS.
+    """
+
+    def cert_verify(self, conn: Any, url: str, verify: Any, cert: Any) -> None:
+        if (
+            verify
+            and getattr(conn, "scheme", "") == "https"
+            and not url.lower().startswith("https")
+        ):
+            # conn is the pool for the TLS proxy itself.
+            url = "https://" + url.split("://", 1)[-1]
+        super().cert_verify(conn, url, verify, cert)  # type: ignore[no-untyped-call]
+
+
+class _GerritSession(requests.Session):
+    """A Requests session that sends the client's credentials and no others.
+
+    Requests would otherwise read a netrc file for any request without
+    credentials, on every redirect as well, and keep using a proxy on a
+    redirect to a host ``NO_PROXY`` covers. Environment CA bundles and
+    proxies still apply, since ``trust_env`` stays on, and an https://
+    proxy is verified whatever the scheme of the request it carries.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.hooks["response"].append(_raise_for_status)
+        for prefix in ("https://", "http://"):
+            self.mount(prefix, _ProxyVerifyingAdapter())
+
+    def prepare_request(
+        self, request: requests.Request
+    ) -> requests.PreparedRequest:
+        if request.auth is None and self.auth is None:
+            request.auth = _NoCredentials()
+        return super().prepare_request(request)
+
+    def rebuild_auth(
+        self, prepared_request: requests.PreparedRequest, response: Any
+    ) -> None:
+        # As Requests does, without the netrc lookup that follows. The
+        # stubs leave should_strip_auth and rebuild_proxies unannotated.
+        headers = prepared_request.headers
+        if "Authorization" in headers and self.should_strip_auth(  # type: ignore[no-untyped-call]
+            response.request.url, prepared_request.url
+        ):
+            del headers["Authorization"]
+
+    def rebuild_proxies(
+        self, prepared_request: requests.PreparedRequest, proxies: Any
+    ) -> dict[str, str]:
+        # Requests keeps the proxies of the request that was redirected;
+        # resolve them afresh for the new URL instead.
+        new_proxies: dict[str, str] = super().rebuild_proxies(  # type: ignore[no-untyped-call]
+            prepared_request, {}
+        )
+        if self.trust_env and _bypasses_proxy_by_network(
+            str(prepared_request.url)
+        ):
+            prepared_request.headers.pop("Proxy-Authorization", None)
+            return {}
+        return new_proxies
+
+    def merge_environment_settings(
+        self,
+        url: Any,
+        proxies: Any,
+        stream: Any,
+        verify: Any,
+        cert: Any,
+    ) -> Any:
+        settings = super().merge_environment_settings(
+            url, proxies, stream, verify, cert
+        )
+        if self.trust_env and _bypasses_proxy_by_network(str(url)):
+            settings["proxies"] = {}
+        return settings
 
 
 # Removed individual retry logic functions - now using centralized framework
@@ -157,8 +310,10 @@ class GerritRestClient:
     """
     Simple JSON REST client for Gerrit with retry/timeout handling.
 
-    - If pygerrit2 is available, use it directly (preferred).
-    - Otherwise, use urllib with manual request construction.
+    Requests go through python-gerrit-api on a session the client owns
+    and closes in ``close()``. With credentials, the client sends HTTP
+    basic auth beneath Gerrit's ``/a/`` prefix, as the server treats a
+    request outside it as anonymous.
     """
 
     def __init__(
@@ -171,7 +326,6 @@ class GerritRestClient:
     ) -> None:
         # Normalize base URL to end with '/'
         base_url = base_url.rstrip("/") + "/"
-        self._base_url: str = base_url
         self._timeout: float = float(timeout)
         self._attempts: int = int(max_attempts)
         self._retry_policy = RetryPolicy(
@@ -179,24 +333,32 @@ class GerritRestClient:
             timeout=timeout,
         )
         self._auth: _Auth | None = None
+        username: str | None = None
+        password: str | None = None
         if auth and auth[0] and auth[1]:
             self._auth = _Auth(auth[0], auth[1])
-
-        # Build pygerrit client if library is present; otherwise None
-        if _PygerritRestApi is not None:
-            if self._auth is not None:
-                if _PygerritHttpAuth is None:
-                    raise GerritRestError(_MSG_PYGERRIT2_REQUIRED_AUTH)
-                self._client: Any = _PygerritRestApi(
-                    url=self._base_url,
-                    auth=_PygerritHttpAuth(
-                        self._auth.user, self._auth.password
-                    ),
-                )
-            else:
-                self._client = _PygerritRestApi(url=self._base_url)
-        else:
-            self._client = None
+            username, password = auth
+            # python-gerrit-api appends /a itself once it has credentials,
+            # so a base URL that already ends in it would get /a/a/.
+            if base_url.endswith("/a/"):
+                base_url = base_url[: -len("a/")]
+        self._session = _GerritSession()
+        # No retries of its own: external_api_call owns the retry policy,
+        # and the timeout set here is the one every request uses.
+        self._gerrit: Any = GerritClient(
+            base_url=base_url,
+            username=username,
+            password=password,
+            use_netrc=False,
+            ssl_verify=True,
+            # Annotated int upstream; Requests takes the float as given.
+            timeout=self._timeout,  # pyright: ignore[reportArgumentType]
+            session=self._session,
+            auth_suffix="/a",
+        )
+        self._base_url: str = base_url
+        if self._auth is not None:
+            self._base_url = base_url + "a/"
 
         log.debug(
             "GerritRestClient(base_url=%s, timeout=%.1fs, attempts=%d, "
@@ -262,66 +424,62 @@ class GerritRestClient:
             msg_required = "path is required"
             raise ValueError(msg_required)
 
-        # Normalize absolute vs relative path
-        rel = path[1:] if path.startswith("/") else path
-        url = urljoin(self._base_url, rel)
+        # python-gerrit-api joins the endpoint to the base URL as a string,
+        # so a leading slash keeps any base path such as /r/.
+        endpoint = "/" + path.removeprefix("/")
+        url: str = self._gerrit.get_endpoint_url(endpoint)
+        shown = requests.utils.requote_uri(url)
 
         try:
-            if self._client is not None and method == "GET" and data is None:
-                # pygerrit2 path: only using GET to keep behavior consistent
-                # with current usage
-                log.debug("Gerrit REST GET via pygerrit2: %s", url)
-                # pygerrit2.get expects a relative path; keep 'path' argument
-                # as-is
-                return self._client.get(
-                    "/" + rel if not path.startswith("/") else path
-                )
-
-            # urllib path (or non-GET with pygerrit2 absent)
-            headers = {"Accept": "application/json"}
-            body_bytes: bytes | None = None
-            if data is not None:
-                headers["Content-Type"] = "application/json"
-                body_bytes = json.dumps(data).encode("utf-8")
-
-            if self._auth is not None:
-                token = base64.b64encode(
-                    f"{self._auth.user}:{self._auth.password}".encode()
-                ).decode("ascii")
-                headers["Authorization"] = f"Basic {token}"
-            scheme = urllib.parse.urlparse(url).scheme
+            scheme = urllib.parse.urlsplit(url).scheme
             if scheme not in ("http", "https"):
                 msg_scheme = f"Unsupported URL scheme for Gerrit REST: {scheme}"
                 raise GerritRestError(msg_scheme)
-            req = urllib.request.Request(
-                url, data=body_bytes, method=method, headers=headers
-            )
+
+            headers = {"Accept": "application/json"}
+            kwargs: dict[str, Any] = {}
+            if data is not None:
+                # python-gerrit-api would send a dict as form data and
+                # drop an empty one, so the client sends the JSON itself.
+                headers["Content-Type"] = "application/json; charset=UTF-8"
+                kwargs["data"] = json.dumps(data).encode("utf-8")
             log.debug(
                 "Gerrit REST %s %s (auth_user=%s)",
                 method,
-                url,
+                shown,
                 self._auth.user if self._auth else "",
             )
 
-            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
-                content = resp.read()
-                # Gerrit prepends ")]}'" in JSON responses to prevent JSON
-                # hijacking; strip if present
-                text = content.decode("utf-8", errors="replace")
-                text = _strip_xssi_guard(text)
-                return _json_loads(text)
+            send = getattr(self._gerrit.requester, method.lower())
+            response = send(url, headers=headers, **kwargs)
+            # Gerrit prepends ")]}'" to JSON responses to prevent JSON
+            # hijacking; strip it and parse the rest strictly, as the
+            # library would return a body without a JSON content type
+            # as text.
+            text = response.content.decode("utf-8", errors="replace")
+            return _json_loads(_strip_xssi_guard(text))
 
-        except urllib.error.HTTPError as http_exc:
-            status = getattr(http_exc, "code", None)
-            msg = f"Gerrit REST {method} {url} failed with HTTP {status}"
+        except requests.HTTPError as http_exc:
+            status = _extract_http_status(http_exc)
+            msg = f"Gerrit REST {method} {shown} failed with HTTP {status}"
             self._log_request_failure(msg, status)
             raise GerritRestError(msg, status=status) from http_exc
 
         except Exception as exc:
             status = _extract_http_status(exc)
-            msg = f"Gerrit REST {method} {url} failed: {exc}"
+            msg = f"Gerrit REST {method} {shown} failed: {exc}"
             self._log_request_failure(msg, status)
             raise GerritRestError(msg, status=status) from exc
+
+    def close(self) -> None:
+        """Close the client's HTTP session and its pooled connections."""
+        self._session.close()
+
+    def __enter__(self) -> GerritRestClient:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
 
     @staticmethod
     def _log_request_failure(msg: str, status: int | None) -> None:
@@ -402,6 +560,9 @@ def build_client_for_host(
       4. Environment variables: GERRIT_HTTP_USER / GERRIT_HTTP_PASSWORD
          If user is not provided, falls back to GERRIT_SSH_USER_G2G per project
          norms.
+      5. The netrc file NETRC names, or ~/.netrc past a local .netrc
+         without the host (if use_netrc=True and netrc_file is None),
+         where pygerrit2 used to look.
 
     Args:
       host: Gerrit hostname (no scheme)
