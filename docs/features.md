@@ -1015,6 +1015,10 @@ The tool resolves configuration values in this order:
 4. Derived values (see [Credential Derivation](#credential-derivation))
 5. Tool defaults (lowest priority)
 
+Boolean options follow the same order: a configuration file entry such
+as `DRY_RUN = "true"` takes effect when neither the flag nor the
+environment variable sets the option.
+
 ### Configuration File
 
 The tool loads configuration from `~/.config/github2gerrit/configuration.txt`
