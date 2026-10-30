@@ -240,9 +240,7 @@ def _check_automation_only(
     progress_tracker: Any = None,
 ) -> None:
     """Check if PR is from automation tool when automation_only enabled."""
-    # Default to True when AUTOMATION_ONLY is not set
-    # (matches action.yaml default: "true")
-    automation_only = env_bool("AUTOMATION_ONLY", True)
+    automation_only = _bool_option("AUTOMATION_ONLY")
 
     if not automation_only:
         log.debug("AUTOMATION_ONLY disabled, accepting all PRs")
@@ -665,7 +663,7 @@ def _check_fork_approval(
     if gh.head_is_trusted:
         return True, ""
 
-    if env_bool("SKIP_FORKS", False):
+    if _bool_option("SKIP_FORKS"):
         log.warning(
             "🛑 Pull request #%s not transferred to Gerrit: SKIP_FORKS is "
             "enabled and the head is not in this repository",
@@ -815,7 +813,7 @@ def _clear_fork_approval_notice(
     Best-effort: failing to tidy a comment must not stop a transfer
     that has been authorised.
     """
-    if env_bool("CI_TESTING", False):
+    if _bool_option("CI_TESTING"):
         return
     _edit_owned_marker_comment(
         pr_obj, render_cleared_comment(status, head_sha=head_sha)
@@ -841,7 +839,7 @@ def _record_fork_transfer(
     """
     if not approved_sha or not pushed or pr_obj is None:
         return
-    if env_bool("CI_TESTING", False):
+    if _bool_option("CI_TESTING"):
         return
     _edit_owned_marker_comment(
         pr_obj, render_transferred_comment(head_sha=approved_sha)
@@ -900,7 +898,7 @@ def _post_fork_approval_notice(
     Best-effort throughout: a comment API failure must never turn a
     block into a crash, nor a block into a pass.
     """
-    if env_bool("CI_TESTING", False):
+    if _bool_option("CI_TESTING"):
         return
 
     body = render_blocked_comment(status, head_sha=head_sha)
@@ -920,7 +918,7 @@ def _post_forks_skipped_notice(pr_obj: Any) -> None:
     best-effort for the same reason as the approval notice: a comment
     API failure must not turn a refusal into a crash or a pass.
     """
-    if env_bool("CI_TESTING", False):
+    if _bool_option("CI_TESTING"):
         return
 
     body = render_forks_skipped_comment()
@@ -1313,36 +1311,103 @@ def _resolve_bool_override(
     return current
 
 
-def _apply_bool_env_overrides(
-    ctx: typer.Context, options: dict[str, tuple[bool, str]]
+@dataclass(frozen=True)
+class _BoolOption:
+    """A boolean CLI option that the configuration file may also set."""
+
+    param: str
+    env_var: str
+    default: bool
+
+
+# Every boolean option the per-organisation configuration file may
+# state. ``default`` must equal the option's Typer default; a test pins
+# the two together. The CLI exports only explicit flags and existing
+# environment values before the file is applied, and fills these
+# defaults afterwards, so the file keeps its documented place between
+# the environment and the tool default.
+_CONFIGURABLE_BOOL_OPTIONS: tuple[_BoolOption, ...] = (
+    _BoolOption("submit_single_commits", "SUBMIT_SINGLE_COMMITS", False),
+    _BoolOption("use_pr_as_commit", "USE_PR_AS_COMMIT", False),
+    _BoolOption("preserve_github_prs", "PRESERVE_GITHUB_PRS", True),
+    _BoolOption("dry_run", "DRY_RUN", False),
+    _BoolOption("allow_duplicates", "ALLOW_DUPLICATES", True),
+    _BoolOption("ci_testing", "CI_TESTING", False),
+    _BoolOption("similarity_files", "SIMILARITY_FILES", False),
+    _BoolOption("allow_orphan_changes", "ALLOW_ORPHAN_CHANGES", False),
+    _BoolOption(
+        "persist_single_mapping_comment",
+        "PERSIST_SINGLE_MAPPING_COMMENT",
+        True,
+    ),
+    _BoolOption("log_reconcile_json", "LOG_RECONCILE_JSON", True),
+    _BoolOption("create_missing", "CREATE_MISSING", False),
+    _BoolOption("automation_only", "AUTOMATION_ONLY", True),
+    _BoolOption("skip_forks", "SKIP_FORKS", False),
+)
+
+
+def _bool_option(env_var: str) -> bool:
+    """Read a configurable boolean, defaulting as its CLI option does."""
+    default = next(
+        opt.default
+        for opt in _CONFIGURABLE_BOOL_OPTIONS
+        if opt.env_var == env_var
+    )
+    return env_bool(env_var, default)
+
+
+def _export_explicit_bool_options(
+    ctx: typer.Context, values: dict[str, bool]
 ) -> None:
-    """Resolve boolean CLI/env overrides and normalise them into env.
+    """Export boolean options that a flag or the environment set.
 
-    ``options`` maps each snake_case parameter name to a ``(value, env_var)``
-    tuple, where ``value`` is what Typer parsed and ``env_var`` is the
-    environment variable that backs it. The env var is passed explicitly
-    rather than assumed to be the upper-case parameter name, because
-    several options use prefixed variables (e.g. verbose uses G2G_VERBOSE).
+    ``values`` maps each parameter name in
+    :data:`_CONFIGURABLE_BOOL_OPTIONS` to what Typer parsed. An explicit
+    flag is exported; a variable already in the environment is
+    normalised to ``"true"``/``"false"``, since Click treats any
+    non-empty string as truthy. An option left at its default is not
+    exported: the configuration file is applied later, for keys not
+    already set, and :func:`_fill_bool_option_defaults` supplies the
+    default after that.
     """
-    for param_name, (current, env_var) in options.items():
-        resolved = _resolve_bool_override(ctx, param_name, env_var, current)
-        os.environ[env_var] = "true" if resolved else "false"
+    for opt in _CONFIGURABLE_BOOL_OPTIONS:
+        if (
+            not _set_on_command_line(ctx, opt.param)
+            and os.getenv(opt.env_var) is None
+        ):
+            continue
+        resolved = _resolve_bool_override(
+            ctx, opt.param, opt.env_var, values[opt.param]
+        )
+        os.environ[opt.env_var] = "true" if resolved else "false"
 
 
-def _export_bool_if_explicit(
-    ctx: typer.Context, param_name: str, env_var: str, current: bool
-) -> None:
-    """Export a boolean option only when the command line set it.
+def _fill_bool_option_defaults(from_config: frozenset[str]) -> None:
+    """Normalise each configurable boolean, defaulting any still unset.
 
-    Unlike :func:`_apply_bool_env_overrides`, this leaves the variable
-    alone when the option is at its default: the per-organisation
-    configuration file is applied to the environment later, for keys
-    not already set, and exporting the default here would shadow a
-    policy that file states. An environment value already present is
-    left as it is, since the consumer parses it directly.
+    Runs after the configuration file is applied, so every reader sees
+    a definite ``"true"``/``"false"``. ``from_config`` names the
+    variables the file supplied; it only labels the debug log line.
     """
-    if _set_on_command_line(ctx, param_name):
-        os.environ[env_var] = "true" if current else "false"
+    for opt in _CONFIGURABLE_BOOL_OPTIONS:
+        raw = os.getenv(opt.env_var)
+        if raw is None or not raw.strip():
+            value, source = opt.default, "default"
+        else:
+            value = parse_bool_env(raw)
+            source = (
+                "configuration file"
+                if opt.env_var in from_config
+                else "flag or environment"
+            )
+        os.environ[opt.env_var] = "true" if value else "false"
+        log.debug(
+            "Boolean option %s=%s (source: %s)",
+            opt.env_var,
+            os.environ[opt.env_var],
+            source,
+        )
 
 
 def _apply_netrc_options(
@@ -1923,38 +1988,24 @@ def main(
 
     _maybe_exit_for_version_or_disabled(version_flag)
 
-    _apply_bool_env_overrides(
+    _export_explicit_bool_options(
         ctx,
         {
-            "submit_single_commits": (
-                submit_single_commits,
-                "SUBMIT_SINGLE_COMMITS",
-            ),
-            "use_pr_as_commit": (use_pr_as_commit, "USE_PR_AS_COMMIT"),
-            "preserve_github_prs": (
-                preserve_github_prs,
-                "PRESERVE_GITHUB_PRS",
-            ),
-            "dry_run": (dry_run, "DRY_RUN"),
-            "allow_duplicates": (allow_duplicates, "ALLOW_DUPLICATES"),
-            "ci_testing": (ci_testing, "CI_TESTING"),
-            "similarity_files": (similarity_files, "SIMILARITY_FILES"),
-            "allow_orphan_changes": (
-                allow_orphan_changes,
-                "ALLOW_ORPHAN_CHANGES",
-            ),
-            "persist_single_mapping_comment": (
-                persist_single_mapping_comment,
-                "PERSIST_SINGLE_MAPPING_COMMENT",
-            ),
-            "log_reconcile_json": (log_reconcile_json, "LOG_RECONCILE_JSON"),
-            "create_missing": (create_missing, "CREATE_MISSING"),
-            "automation_only": (automation_only, "AUTOMATION_ONLY"),
+            "submit_single_commits": submit_single_commits,
+            "use_pr_as_commit": use_pr_as_commit,
+            "preserve_github_prs": preserve_github_prs,
+            "dry_run": dry_run,
+            "allow_duplicates": allow_duplicates,
+            "ci_testing": ci_testing,
+            "similarity_files": similarity_files,
+            "allow_orphan_changes": allow_orphan_changes,
+            "persist_single_mapping_comment": persist_single_mapping_comment,
+            "log_reconcile_json": log_reconcile_json,
+            "create_missing": create_missing,
+            "automation_only": automation_only,
+            "skip_forks": skip_forks,
         },
     )
-    # SKIP_FORKS is a policy a per-organisation configuration file may
-    # state, so its default is not exported; see _export_bool_if_explicit.
-    _export_bool_if_explicit(ctx, "skip_forks", "SKIP_FORKS", skip_forks)
 
     _apply_netrc_options(no_netrc, netrc_file, netrc_optional, gerrit_server)
     _configure_logging_and_progress(verbose, show_progress)
@@ -2087,8 +2138,8 @@ def _run_gerrit_cleanup_tasks(
 
 def _build_inputs_from_env() -> Inputs:
     return Inputs(
-        submit_single_commits=env_bool("SUBMIT_SINGLE_COMMITS", False),
-        use_pr_as_commit=env_bool("USE_PR_AS_COMMIT", False),
+        submit_single_commits=_bool_option("SUBMIT_SINGLE_COMMITS"),
+        use_pr_as_commit=_bool_option("USE_PR_AS_COMMIT"),
         fetch_depth=int(env_str("FETCH_DEPTH", "10") or "10"),
         gerrit_known_hosts=env_str("GERRIT_KNOWN_HOSTS"),
         gerrit_ssh_privkey_g2g=env_str("GERRIT_SSH_PRIVKEY_G2G"),
@@ -2099,8 +2150,8 @@ def _build_inputs_from_env() -> Inputs:
             "ORGANIZATION", env_str("GITHUB_REPOSITORY_OWNER")
         ),
         reviewers_email=env_str("REVIEWERS_EMAIL", ""),
-        preserve_github_prs=env_bool("PRESERVE_GITHUB_PRS", True),
-        dry_run=env_bool("DRY_RUN", False),
+        preserve_github_prs=_bool_option("PRESERVE_GITHUB_PRS"),
+        dry_run=_bool_option("DRY_RUN"),
         normalise_commit=env_bool("NORMALISE_COMMIT", True),
         gerrit_server=env_str("GERRIT_SERVER", ""),
         # 0 means unset. A blank value is what the action passes when the
@@ -2111,21 +2162,21 @@ def _build_inputs_from_env() -> Inputs:
         issue_id=env_str("ISSUE_ID", ""),
         issue_id_lookup_json=env_str("ISSUE_ID_LOOKUP_JSON", ""),
         commit_rules_json=env_str("COMMIT_RULES_JSON", ""),
-        allow_duplicates=env_bool("ALLOW_DUPLICATES", True),
-        ci_testing=env_bool("CI_TESTING", False),
+        allow_duplicates=_bool_option("ALLOW_DUPLICATES"),
+        ci_testing=_bool_option("CI_TESTING"),
         duplicates_filter=env_str("DUPLICATE_TYPES", "open"),
         reuse_strategy=env_str("REUSE_STRATEGY", "topic+comment"),
         similarity_subject=float(env_str("SIMILARITY_SUBJECT", "0.7") or "0.7"),
         similarity_update_factor=float(
             env_str("SIMILARITY_UPDATE_FACTOR", "0.75") or "0.75"
         ),
-        similarity_files=env_bool("SIMILARITY_FILES", False),
-        allow_orphan_changes=env_bool("ALLOW_ORPHAN_CHANGES", False),
-        persist_single_mapping_comment=env_bool(
-            "PERSIST_SINGLE_MAPPING_COMMENT", True
+        similarity_files=_bool_option("SIMILARITY_FILES"),
+        allow_orphan_changes=_bool_option("ALLOW_ORPHAN_CHANGES"),
+        persist_single_mapping_comment=_bool_option(
+            "PERSIST_SINGLE_MAPPING_COMMENT"
         ),
-        log_reconcile_json=env_bool("LOG_RECONCILE_JSON", True),
-        create_missing=env_bool("CREATE_MISSING", False),
+        log_reconcile_json=_bool_option("LOG_RECONCILE_JSON"),
+        create_missing=_bool_option("CREATE_MISSING"),
     )
 
 
@@ -2880,15 +2931,17 @@ def _load_effective_inputs() -> Inputs:
 
     # Debug: Show what configuration would be applied
     log.debug("Configuration to apply: %s", cfg)
-    if "DRY_RUN" in cfg:
-        log.warning(
-            "Configuration contains DRY_RUN=%s, this may override "
-            "environment DRY_RUN=%s",
-            cfg["DRY_RUN"],
-            os.getenv("DRY_RUN"),
-        )
+    bool_from_config = frozenset(
+        opt.env_var
+        for opt in _CONFIGURABLE_BOOL_OPTIONS
+        if (cfg.get(opt.env_var) or "").strip()
+        and not (os.getenv(opt.env_var) or "").strip()
+    )
+    if "DRY_RUN" in bool_from_config:
+        log.warning("Configuration file sets DRY_RUN=%s", cfg["DRY_RUN"])
 
     apply_config_to_env(cfg)
+    _fill_bool_option_defaults(bool_from_config)
 
     # Refresh inputs after applying configuration to environment
     data = _build_inputs_from_env()
