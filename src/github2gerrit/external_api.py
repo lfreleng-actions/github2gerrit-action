@@ -225,6 +225,10 @@ def _is_transient_gerrit_error(exc: BaseException) -> bool | None:
     """
     if "HTTP 5" in str(exc) or "HTTP 429" in str(exc):
         return True
+    # GerritRestError carries the status of the HTTP error behind it
+    status = getattr(exc, "status", None)
+    if isinstance(status, int):
+        return (500 <= status <= 599) or (status == 429)
     # Also check for original HTTP errors that caused the GerritRestError
     if hasattr(exc, "__cause__") and isinstance(
         exc.__cause__, urllib.error.HTTPError

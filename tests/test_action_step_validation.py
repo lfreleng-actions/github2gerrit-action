@@ -913,14 +913,14 @@ class TestActionStepValidation:
     ):
         """The Python pin and the lockfile agree.
 
-        The first sync pass refuses to build from source, so a runtime
-        or build dependency without a Linux wheel for the pinned minor
-        fails every run; so does uv itself, which the bootstrap installs
+        The sync refuses to build from source, so a runtime or build
+        dependency without a Linux wheel for the pinned minor fails
+        every run; so does uv itself, which the bootstrap installs
         wheels only from its lockfile entry. Checked here, for both
         runner architectures, so moving the pin or updating the
-        lockfile shows the consequence before a caller does.
-        Source-only distributions are excluded: the second pass builds
-        those deliberately.
+        lockfile shows the consequence before a caller does. A
+        source-only distribution has no wheel for any Python, so one
+        that enters the closure fails here too.
 
         The closure is the one the install step syncs, no wider: a
         package's extras are followed only where a dependency asks for
@@ -1025,10 +1025,9 @@ class TestActionStepValidation:
                 name
                 for name in closure
                 if packages[name].get("source", {}).get("registry")
-                and packages[name].get("wheels")
                 and not any(
                     parse_wheel_filename(w["url"].rsplit("/", 1)[1])[3] & tags
-                    for w in packages[name]["wheels"]
+                    for w in packages[name].get("wheels", [])
                 )
             )
             assert not missing, (
@@ -1286,11 +1285,13 @@ class TestActionStepValidation:
         assert 'cp -R "${GITHUB_ACTION_PATH}/." "${src}/"' in script
         assert '--directory "${GITHUB_ACTION_PATH}"' not in script
         # Every dependency, build backend included, comes from the
-        # lockfile at this commit, hash-verified and wheels only on the
-        # first pass; the project itself is then built offline with
-        # that backend, so nothing is fetched that the lockfile does
-        # not name.
+        # lockfile at this commit, hash-verified and wheels only, in a
+        # single sync that builds nothing; the project itself is then
+        # built offline with that backend, so nothing is fetched that
+        # the lockfile does not name.
         assert 'uv sync --directory "${src}" --frozen --no-build' in script
+        assert script.count("uv sync") == 1
+        assert "--no-build-isolation-package" not in script
         assert "--no-dev --group build --no-install-project" in script
         assert 'uv pip install --directory "${src}"' in script
         assert "--offline --no-deps --no-build-isolation ." in script
@@ -1319,48 +1320,6 @@ class TestActionStepValidation:
         # has to be the one git finds, not whatever a runner carries
         # globally, so its presence beside the tool is checked for.
         assert 'test -x "${UV_PROJECT_ENVIRONMENT}/bin/git-review"' in script
-
-    def test_source_only_distributions_build_without_isolation(
-        self, action_config
-    ):
-        """Every sdist-only dependency is named, and nothing else is.
-
-        uv builds a source distribution in an isolated environment whose
-        build requirements it resolves from the index, outside the
-        lockfile. The install step therefore builds each such package
-        without isolation, against build requirements the lockfile put
-        in place first; it needs the list to be exact. A dependency
-        update that adds a source-only distribution fails here, which
-        is the moment to check its build requirements are locked too.
-        """
-        import tomllib
-
-        root = Path(__file__).parent.parent
-        lock = tomllib.loads((root / "uv.lock").read_text())
-        sdist_only = {
-            package["name"]
-            for package in lock["package"]
-            if package.get("source", {}).get("registry")
-            and not package.get("wheels")
-        }
-
-        install_step = next(
-            step
-            for step in action_config["runs"]["steps"]
-            if "Setup github2gerrit" in step.get("name", "")
-        )
-        listed = set(install_step["env"]["SDIST_ONLY"].split())
-        assert listed == sdist_only, (
-            f"SDIST_ONLY in action.yaml lists {sorted(listed)} but the "
-            f"lockfile's source-only distributions are {sorted(sdist_only)}"
-        )
-
-        script = install_step["run"]
-        assert "--no-install-package" in script
-        assert "--no-build-isolation-package" in script
-        # Two passes: the build requirements land hash-verified first,
-        # then the source-only packages build against them.
-        assert script.count("uv sync --directory") == 2
 
     def test_the_build_group_matches_the_build_system(self):
         """The lockfile group the install step relies on is complete.

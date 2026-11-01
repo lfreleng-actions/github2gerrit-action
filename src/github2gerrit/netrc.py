@@ -19,6 +19,7 @@ The module supports:
 from __future__ import annotations
 
 import logging
+import netrc as stdlib_netrc
 import os
 import re
 import stat
@@ -670,6 +671,75 @@ def get_credentials_for_host(
     return credentials
 
 
+def _fallback_netrc_path() -> Path | None:
+    """Return the netrc file pygerrit2 read when it had no credentials.
+
+    pygerrit2 left the lookup to requests, which reads the file the
+    ``NETRC`` environment variable names, as curl does, and otherwise
+    the first of ``~/.netrc`` and ``~/_netrc`` that exists.
+
+    Returns:
+        The path with ``~`` expanded, or None when there is none.
+    """
+    value = os.environ.get("NETRC", "").strip()
+    if value:
+        return Path(value).expanduser()
+    home = Path.home()
+    for name in (".netrc", "_netrc"):
+        if (home / name).is_file():
+            return home / name
+    return None
+
+
+def _fallback_netrc_credentials(
+    host: str, path: Path
+) -> GerritCredentials | None:
+    """Look *host* up in the netrc file from ``_fallback_netrc_path``.
+
+    The file is read with the standard library's parser, as requests
+    read it, rather than this module's: that parser takes an unquoted
+    ``#`` as part of a password and falls back to ``account`` when an
+    entry has no ``login``. A missing or unparsable file yields None,
+    as it did for requests, so a stale ``NETRC`` leaves the request
+    anonymous rather than failing the run.
+    """
+    if not path.is_file():
+        log.debug("Netrc file does not exist: %s", path)
+        return None
+    normalized_host = _normalize_host_for_netrc_lookup(host)
+    try:
+        entry = stdlib_netrc.netrc(str(path)).authenticators(normalized_host)
+    except (stdlib_netrc.NetrcParseError, OSError):
+        log.warning("Ignoring netrc file that cannot be parsed: %s", path)
+        return None
+    if entry is None:
+        log.debug(
+            "No netrc credentials found for %s in %s", normalized_host, path
+        )
+        return None
+    login, account, password = entry
+    username = login or account
+    if not username or not password:
+        log.debug(
+            "Netrc entry for %s in %s lacks a login or password",
+            normalized_host,
+            path,
+        )
+        return None
+    log.debug(
+        "Using fallback netrc credentials for %s (login: %s) in %s",
+        normalized_host,
+        username,
+        path,
+    )
+    return GerritCredentials(
+        username=username,
+        password=password,
+        source=CredentialSource.NETRC,
+        source_detail=str(path),
+    )
+
+
 def resolve_gerrit_credentials(
     host: str,
     *,
@@ -691,9 +761,19 @@ def resolve_gerrit_credentials(
 
     Priority order:
     1. Explicit CLI arguments (explicit_username/explicit_password)
-    2. .netrc file (if use_netrc=True)
+    2. .netrc file (if use_netrc=True): netrc_file when given, else the
+       first of ./.netrc, ~/.netrc and ~/_netrc that exists
     3. Primary environment variables (env_username_var/env_password_var)
     4. Fallback environment variables (if provided)
+    5. Fallback username with the primary password
+    6. The netrc file the NETRC environment variable names, else
+       ~/.netrc or ~/_netrc (if use_netrc=True and no netrc_file is
+       given)
+
+    Step 6 is the lookup pygerrit2 made, through requests, when every
+    other source had come up empty, and it keeps that place. It parses
+    the file as requests did, so it can find an entry step 2 missed in
+    the same file.
 
     Args:
         host: Gerrit server hostname for netrc lookup.
@@ -802,6 +882,14 @@ def resolve_gerrit_credentials(
                 source=CredentialSource.ENVIRONMENT,
                 source_detail=f"{fallback_env_username_var}/{env_password_var}",
             )
+
+    # 6. Try the netrc file pygerrit2 would have read
+    if use_netrc and netrc_file is None:
+        fallback_path = _fallback_netrc_path()
+        if fallback_path is not None:
+            fallback_creds = _fallback_netrc_credentials(host, fallback_path)
+            if fallback_creds is not None:
+                return fallback_creds
 
     log.debug("No Gerrit credentials found from any source")
     return None

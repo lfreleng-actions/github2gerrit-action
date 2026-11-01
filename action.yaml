@@ -359,17 +359,6 @@ runs:
         # builds the environment from it rather than from whatever else
         # it might discover on the runner.
         UV_PYTHON: ${{ steps.setup-python.outputs.python-path }}
-        # Distributions the lockfile carries only as a source archive.
-        # uv would build each in an isolated environment whose build
-        # requirements it resolves afresh from the index, outside the
-        # lockfile; so they are installed in a second pass, without
-        # isolation, against the hash-verified build requirements the
-        # first pass put in place (setuptools and pbr are locked
-        # dependencies). tests/test_action_step_validation.py checks
-        # this list against the lockfile, so a dependency update that
-        # adds a source-only distribution fails there rather than
-        # quietly widening what a run fetches.
-        SDIST_ONLY: pygerrit2
       run: |
         # Install github2gerrit from this action's own checkout
         set -euo pipefail
@@ -418,22 +407,18 @@ runs:
         # left out of this step and installed below, once its version
         # is known.
         #
-        # The first pass accepts wheels only. Were a locked release to
-        # lack a wheel for the runner's Python, uv would otherwise build
-        # its source archive in an isolated environment resolved from
-        # the index, outside the lockfile; failing instead is the
-        # visible outcome, and a lockfile update, or moving the Python
-        # pin on the setup step above, the answer.
-        skip=()
-        isolate=()
-        for name in ${SDIST_ONLY}; do
-          skip+=(--no-install-package "${name}")
-          isolate+=(--no-build-isolation-package "${name}")
-        done
+        # The sync accepts wheels only. Were a locked release to lack a
+        # wheel for the runner's Python, uv would otherwise build its
+        # source archive in an isolated environment resolved from the
+        # index, outside the lockfile; failing instead is the visible
+        # outcome, and a lockfile update, or moving the Python pin on
+        # the setup step above, the answer.
+        # tests/test_action_step_validation.py checks that every release
+        # this sync installs has a wheel for the pinned Python, so a
+        # dependency update that adds a source-only distribution fails
+        # there rather than here.
         uv sync --directory "${src}" --frozen --no-build \
-          --no-dev --group build --no-install-project "${skip[@]}"
-        uv sync --directory "${src}" --frozen \
-          --no-dev --group build --no-install-project "${isolate[@]}"
+          --no-dev --group build --no-install-project
 
         # hatch-vcs takes the version from git metadata, which the
         # runner's action download does not carry. Derive it from the
