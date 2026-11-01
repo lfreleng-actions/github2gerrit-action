@@ -277,6 +277,27 @@ def reset_derived_key_provenance() -> Iterable[None]:
 
 
 @pytest.fixture(autouse=True)
+def restore_bool_option_environment() -> Iterable[None]:
+    """Restore the configurable boolean variables after every test.
+
+    The CLI writes each of them to ``os.environ`` once the configuration
+    file is applied, so any test that runs ``main`` or
+    ``_load_effective_inputs`` would otherwise leave a value behind that
+    reads as an explicit setting to every later test.
+    """
+    from github2gerrit.cli import _CONFIGURABLE_BOOL_OPTIONS
+
+    names = [opt.env_var for opt in _CONFIGURABLE_BOOL_OPTIONS]
+    saved = {name: os.environ.get(name) for name in names}
+    yield
+    for name, value in saved.items():
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
+
+
+@pytest.fixture(autouse=True)
 def reset_gerrit_project_listings() -> Iterable[None]:
     """Empty the per-process Gerrit project-listing memo around every test.
 
