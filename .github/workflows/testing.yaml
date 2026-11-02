@@ -106,10 +106,20 @@ jobs:
           echo "Error: previous test step did NOT fail ❌"
           exit 1
 
+  ### Run the CLI against LF Gerrit's sandbox project ###
+  # Transfers an open Dependabot pull request from lfit/sandbox, first
+  # in dry-run and then live, with Gerrit REST authenticated. There is
+  # no job running the composite action against live Gerrit: the action
+  # takes its pull request from this repository's event and token, so
+  # it cannot target lfit/sandbox. The jobs above cover the action
+  # under G2G_NO_GERRIT.
   cli-integration-test:
     name: 'CLI Integration Test'
     runs-on: 'ubuntu-latest'
-    # Dedicated environment scopes access to the Gerrit test secrets
+    # GERRIT_SSH_PRIVKEY_G2G, GERRIT_HTTP_PASSWORD and
+    # READ_ONLY_GITHUB_TOKEN are repository secrets, not secrets of this
+    # environment, so the environment does not limit which jobs can
+    # read them.
     environment: 'development'
     permissions:
       contents: read
@@ -135,24 +145,69 @@ jobs:
         with:
           ignore-empty-workdir: true
 
+      - name: 'Select sandbox pull request'
+        id: select-pr
+        shell: bash
+        env:
+          # Cross-repository read access to lfit/sandbox; the default
+          # github.token only covers this repository
+          GH_TOKEN: "${{ secrets.READ_ONLY_GITHUB_TOKEN }}"
+          SANDBOX_REPOSITORY: 'lfit/sandbox'
+          # Optional overrides naming the pull request for the dry-run
+          # and the live step; a closed one fails that step
+          VARS_DEPENDABOT_PR_URL_1: ${{ vars.DEPENDABOT_PR_URL_1 }}
+          VARS_DEPENDABOT_PR_URL_2: ${{ vars.DEPENDABOT_PR_URL_2 }}
+        run: |
+          # Select an open Dependabot pull request in the sandbox
+          set -euo pipefail
+          selected=""
+          if [[ -z "${VARS_DEPENDABOT_PR_URL_1:-}" \
+            || -z "${VARS_DEPENDABOT_PR_URL_2:-}" ]]; then
+            if [[ -z "${GH_TOKEN:-}" ]]; then
+              echo "::error::READ_ONLY_GITHUB_TOKEN is not set;" \
+                "cannot list pull requests in ${SANDBOX_REPOSITORY}"
+              exit 1
+            fi
+            selected="$(gh pr list --repo "${SANDBOX_REPOSITORY}" \
+              --author 'app/dependabot' --state open --limit 1 \
+              --json url --jq '.[0].url // ""')"
+            if [[ -z "${selected}" ]]; then
+              echo "::error::No open app/dependabot pull request in" \
+                "${SANDBOX_REPOSITORY}. Open one there, or set the" \
+                "DEPENDABOT_PR_URL_1 and DEPENDABOT_PR_URL_2 variables" \
+                "to open pull requests."
+              exit 1
+            fi
+          fi
+          dry_run_url="${VARS_DEPENDABOT_PR_URL_1:-${selected}}"
+          live_url="${VARS_DEPENDABOT_PR_URL_2:-${selected}}"
+          pattern="^https://github\.com/${SANDBOX_REPOSITORY}/pull/[1-9][0-9]*$"
+          for url in "${dry_run_url}" "${live_url}"; do
+            if ! [[ "${url}" =~ ${pattern} ]]; then
+              echo "::error::Not a ${SANDBOX_REPOSITORY} pull request URL: ${url}"
+              exit 1
+            fi
+          done
+          echo "Dry-run pull request: ${dry_run_url}"
+          echo "Live pull request: ${live_url}"
+          {
+            echo "dry_run_url=${dry_run_url}"
+            echo "live_url=${live_url}"
+          } >> "$GITHUB_OUTPUT"
+
       - name: 'Test CLI integration with Gerrit [Dry Run]'
         shell: bash
         env:
-          # GitHub variables passed to CLI
-          # Note: Using READ_ONLY_GITHUB_TOKEN for cross-repository access to lfit/sandbox
-          # The default github.token only has permissions for the current repository
+          # Cross-repository read access to lfit/sandbox; the default
+          # github.token only covers this repository
           GITHUB_TOKEN: "${{ secrets.READ_ONLY_GITHUB_TOKEN }}"
-          GITHUB_EVENT_NAME: 'workflow_dispatch'
-          GITHUB_REPOSITORY: "${{ github.repository }}"
-          GITHUB_REPOSITORY_OWNER: "${{ github.repository_owner }}"
-          GITHUB_SERVER_URL: "${{ github.server_url }}"
-          GITHUB_RUN_ID: "${{ github.run_id }}"
-          GITHUB_SHA: "${{ github.sha }}"
           # Gerrit configuration
           GERRIT_KNOWN_HOSTS: "${{ vars.GERRIT_KNOWN_HOSTS }}"
           GERRIT_SSH_PRIVKEY_G2G: "${{ secrets.GERRIT_SSH_PRIVKEY_G2G }}"
           GERRIT_SSH_USER_G2G: 'modesevenindustrialsolutions'
           GERRIT_SSH_USER_G2G_EMAIL: 'mwatkins@linuxfoundation.org'
+          GERRIT_HTTP_USER: 'modesevenindustrialsolutions'
+          GERRIT_HTTP_PASSWORD: "${{ secrets.GERRIT_HTTP_PASSWORD }}"
           GERRIT_SERVER: 'gerrit.linuxfoundation.org'
           GERRIT_PROJECT: 'sandbox'
           GERRIT_SERVER_PORT: '29418'
@@ -163,26 +218,51 @@ jobs:
           G2G_VERBOSE: 'true'
           FETCH_DEPTH: '50'
           USE_PR_AS_COMMIT: 'true'
-          VARS_DEPENDABOT_PR_URL_1: ${{ vars.DEPENDABOT_PR_URL_1 }}
+          PR_URL: ${{ steps.select-pr.outputs.dry_run_url }}
           # lfit/sandbox has correct .gitreview pointing to LF Gerrit
         run: |
+          # Dry-run the single-PR path with Gerrit REST authenticated
+          set -euo pipefail
           echo "Testing GitHub2Gerrit CLI integration with LF Gerrit server..."
-          echo "Target PR: ${VARS_DEPENDABOT_PR_URL_1}"
+          echo "Target PR: ${PR_URL}"
+
+          # Without a password the tool falls back to anonymous REST,
+          # which would leave the authenticated path untested
+          if [[ -z "${GERRIT_HTTP_PASSWORD:-}" ]]; then
+            echo "::error::GERRIT_HTTP_PASSWORD secret is not set"
+            exit 1
+          fi
 
           # Install current code in development mode and test CLI directly
           echo "Installing current code: uv pip install --system -e ."
           uv pip install --system -e .
 
-          echo "Running: python -m github2gerrit.cli ${VARS_DEPENDABOT_PR_URL_1}"
-          python -m github2gerrit.cli "${VARS_DEPENDABOT_PR_URL_1}"
+          # A step cannot override the runner's GITHUB_EVENT_NAME and
+          # GITHUB_EVENT_PATH through env:, so they are set here, for
+          # the CLI alone; a push then takes the same single-PR path as
+          # a dispatch rather than the merged-PR cleanup path.
+          log="${RUNNER_TEMP}/g2g-dry-run.log"
+          echo "Running: python -m github2gerrit.cli ${PR_URL}"
+          GITHUB_EVENT_NAME=workflow_dispatch GITHUB_EVENT_PATH='' \
+            python -m github2gerrit.cli "${PR_URL}" 2>&1 | tee "${log}"
 
-          echo "✅ Dry-run CLI integration test completed successfully"
+          if ! grep -qF "Gerrit REST authenticated access verified" "${log}"; then
+            echo "::error::Gerrit REST authentication was not verified"
+            exit 1
+          fi
+          if grep -qF "(auth_user=)" "${log}"; then
+            echo "::error::A Gerrit REST call ran anonymously"
+            exit 1
+          fi
+
+          echo "✅ Dry-run CLI integration test passed"
           {
             echo "CLI Integration test summary:"
-            echo "- Tested with external PR: ${VARS_DEPENDABOT_PR_URL_1}"
+            echo "- Tested with external PR: ${PR_URL}"
             echo "- Target Gerrit: gerrit.linuxfoundation.org"
             echo "- Target Project: sandbox"
             echo "- Mode: DRY_RUN (validation only)"
+            echo "- Gerrit REST: authenticated as ${GERRIT_HTTP_USER}"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 'Test CLI Error Handling (Expected Failure)'
@@ -192,32 +272,22 @@ jobs:
         env:
           # Use invalid token to force GitHub API failure
           GITHUB_TOKEN: "invalid_token_12345"
-          # NOTE: GITHUB_EVENT_NAME cannot be reliably overridden at
-          # step level when the runner sets it (e.g. push-triggered
-          # workflows). Instead we disable the push-event cleanup path
-          # via CLOSE_MERGED_PRS and clear GITHUB_EVENT_PATH so the
-          # tool enters the single-PR processing path where invalid
-          # token errors are properly surfaced with exit code 4.
-          GITHUB_EVENT_NAME: 'workflow_dispatch'
-          GITHUB_EVENT_PATH: ''
-          GITHUB_REPOSITORY: "${{ github.repository }}"
-          GITHUB_REPOSITORY_OWNER: "${{ github.repository_owner }}"
-          GITHUB_SERVER_URL: "${{ github.server_url }}"
-          GITHUB_RUN_ID: "${{ github.run_id }}"
-          GITHUB_SHA: "${{ github.sha }}"
           GERRIT_KNOWN_HOSTS: "${{ vars.GERRIT_KNOWN_HOSTS }}"
           GERRIT_SSH_PRIVKEY_G2G: "${{ secrets.GERRIT_SSH_PRIVKEY_G2G }}"
           DRY_RUN: 'true'
           CLOSE_MERGED_PRS: 'false'
           SYNC_ALL_OPEN_PRS: 'false'
-          VARS_DEPENDABOT_PR_URL_1: ${{ vars.DEPENDABOT_PR_URL_1 }}
+          PR_URL: ${{ steps.select-pr.outputs.dry_run_url }}
         run: |
           echo "Testing GitHub API error handling with invalid token..."
-          echo "Target PR: ${VARS_DEPENDABOT_PR_URL_1}"
+          echo "Target PR: ${PR_URL}"
 
-          # Capture exit code
+          # Capture exit code. The event is set for the CLI alone, as
+          # in the dry-run step, so the tool enters the single-PR path
+          # where an invalid token surfaces as exit code 4.
           EXIT_CODE=0
-          python -m github2gerrit.cli "${VARS_DEPENDABOT_PR_URL_1}" || EXIT_CODE=$?
+          GITHUB_EVENT_NAME=workflow_dispatch GITHUB_EVENT_PATH='' \
+            python -m github2gerrit.cli "${PR_URL}" || EXIT_CODE=$?
           echo "EXIT_CODE=$EXIT_CODE" >> "$GITHUB_ENV"
 
           # Should fail with exit code 4 (GITHUB_API_ERROR)
@@ -243,21 +313,16 @@ jobs:
       - name: "Test CLI integration with Gerrit"
         shell: bash
         env:
-          # GitHub context (needed for CLI operation)
-          # Note: Using READ_ONLY_GITHUB_TOKEN for cross-repository access to lfit/sandbox
-          # The default github.token only has permissions for the current repository
+          # Cross-repository read access to lfit/sandbox; the default
+          # github.token only covers this repository
           GITHUB_TOKEN: "${{ secrets.READ_ONLY_GITHUB_TOKEN }}"
-          GITHUB_EVENT_NAME: 'workflow_dispatch'
-          GITHUB_REPOSITORY: "${{ github.repository }}"
-          GITHUB_REPOSITORY_OWNER: "${{ github.repository_owner }}"
-          GITHUB_SERVER_URL: "${{ github.server_url }}"
-          GITHUB_RUN_ID: "${{ github.run_id }}"
-          GITHUB_SHA: "${{ github.sha }}"
           # Gerrit configuration - force override of .gitreview
           GERRIT_KNOWN_HOSTS: "${{ vars.GERRIT_KNOWN_HOSTS }}"
           GERRIT_SSH_PRIVKEY_G2G: "${{ secrets.GERRIT_SSH_PRIVKEY_G2G }}"
           GERRIT_SSH_USER_G2G: 'modesevenindustrialsolutions'
           GERRIT_SSH_USER_G2G_EMAIL: 'mwatkins@linuxfoundation.org'
+          GERRIT_HTTP_USER: 'modesevenindustrialsolutions'
+          GERRIT_HTTP_PASSWORD: "${{ secrets.GERRIT_HTTP_PASSWORD }}"
           GERRIT_SERVER: 'gerrit.linuxfoundation.org'
           GERRIT_PROJECT: 'sandbox'
           GERRIT_SERVER_PORT: '29418'
@@ -268,136 +333,68 @@ jobs:
           G2G_VERBOSE: 'true'
           FETCH_DEPTH: '50'
           USE_PR_AS_COMMIT: 'true'
-          VARS_DEPENDABOT_PR_URL_2: ${{ vars.DEPENDABOT_PR_URL_2 }}
+          PR_URL: ${{ steps.select-pr.outputs.live_url }}
           # lfit/sandbox has correct .gitreview pointing to LF Gerrit
           # Force derivation to be disabled so our overrides take precedence
         run: |
+          # Push the pull request to Gerrit with REST authenticated
+          set -euo pipefail
           echo '🚀 Integration Test Summary'
-          echo "Target PR: ${VARS_DEPENDABOT_PR_URL_2}"
+          echo "Target PR: ${PR_URL}"
+
+          if [[ -z "${GERRIT_HTTP_PASSWORD:-}" ]]; then
+            echo "::error::GERRIT_HTTP_PASSWORD secret is not set"
+            exit 1
+          fi
 
           # Configure git with your identity
           # Gerrit private SSH key is linked to this account
           git config --global user.name "$GERRIT_SSH_USER_G2G"
           git config --global user.email "$GERRIT_SSH_USER_G2G_EMAIL"
 
-          # Push to Gerrit
+          # The CLI writes its outputs here; read them back to confirm
+          # the push produced a change, rather than taking a zero exit
+          # code as proof of one
+          outputs="${RUNNER_TEMP}/g2g-live-outputs"
+          log="${RUNNER_TEMP}/g2g-live.log"
+          : > "${outputs}"
+
+          # Event set for the CLI alone, as in the dry-run step
           echo "Pushing change to Gerrit..."
-          python -m github2gerrit.cli "${VARS_DEPENDABOT_PR_URL_2}"
+          GITHUB_EVENT_NAME=workflow_dispatch GITHUB_EVENT_PATH='' \
+            GITHUB_OUTPUT="${outputs}" \
+            python -m github2gerrit.cli "${PR_URL}" 2>&1 | tee "${log}"
 
-  action-integration-test:
-    name: 'Action Integration Test'
-    runs-on: 'ubuntu-latest'
-    # Dedicated environment scopes access to the Gerrit test secrets
-    environment: 'development'
-    permissions:
-      contents: read
-    timeout-minutes: 15
-    # Only run on workflow_dispatch or push to main
-    # yamllint disable-line rule:line-length
-    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
-    steps:
-      # yamllint disable-line rule:line-length
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
+          if grep -qF "(auth_user=)" "${log}"; then
+            echo "::error::A Gerrit REST call ran anonymously"
+            exit 1
+          fi
+          # Match a request line, not the client constructor's log,
+          # which also names auth_user but precedes any request
+          request="Gerrit REST (GET|POST|PUT|DELETE) .* "
+          request+="\(auth_user=${GERRIT_HTTP_USER}\)"
+          if ! grep -qE "${request}" "${log}"; then
+            echo "::error::No Gerrit REST call ran authenticated"
+            exit 1
+          fi
 
-      - name: 'Setup Python'
-        # yamllint disable-line rule:line-length
-        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
-        with:
-          python-version-file: 'pyproject.toml'
+          # Reconciliation can report an existing change's URL without
+          # pushing, so the URL alone does not prove a push
+          if ! grep -qF "Successfully pushed changes to Gerrit" "${log}"; then
+            echo "::error::The CLI pushed nothing to Gerrit"
+            exit 1
+          fi
+          change_url="$(grep -oE \
+            'https://gerrit\.linuxfoundation\.org/infra/c/sandbox/\+/[0-9]+' \
+            "${outputs}" | head -n 1 || true)"
+          if [[ -z "${change_url}" ]]; then
+            echo "::error::The CLI reported no sandbox change URL"
+            exit 1
+          fi
 
-      - name: "Install uv"
-        # yamllint disable-line rule:line-length
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
-        with:
-          ignore-empty-workdir: true
-
-      - name: 'Test Action integration with Gerrit [Dry Run]'
-        shell: bash
-        env:
-          # GitHub variables passed to action
-          # Note: Using READ_ONLY_GITHUB_TOKEN for cross-repository access to lfit/sandbox
-          # The default github.token only has permissions for the current repository
-          GITHUB_TOKEN: "${{ secrets.READ_ONLY_GITHUB_TOKEN }}"
-          GITHUB_EVENT_NAME: 'workflow_dispatch'
-          GITHUB_REPOSITORY: "${{ github.repository }}"
-          GITHUB_REPOSITORY_OWNER: "${{ github.repository_owner }}"
-          GITHUB_SERVER_URL: "${{ github.server_url }}"
-          GITHUB_RUN_ID: "${{ github.run_id }}"
-          GITHUB_SHA: "${{ github.sha }}"
-          # Gerrit configuration
-          GERRIT_KNOWN_HOSTS: "${{ vars.GERRIT_KNOWN_HOSTS }}"
-          GERRIT_SSH_PRIVKEY_G2G: "${{ secrets.GERRIT_SSH_PRIVKEY_G2G }}"
-          GERRIT_SERVER: 'gerrit.linuxfoundation.org'
-          GERRIT_PROJECT: 'sandbox'
-          DRY_RUN: 'true'
-          G2G_ENABLE_DERIVATION: 'false'
-          ALLOW_DUPLICATES: 'true'
-          PRESERVE_GITHUB_PRS: 'true'
-          G2G_VERBOSE: 'true'
-          VARS_DEPENDABOT_PR_URL_1: ${{ vars.DEPENDABOT_PR_URL_1 }}
-          # lfit/sandbox has correct .gitreview pointing to LF Gerrit
-        run: |
-          echo "Testing GitHub2Gerrit CLI integration with LF Gerrit server..."
-          echo "Target PR: ${VARS_DEPENDABOT_PR_URL_1}"
-
-          # Install current code in development mode and test CLI directly
-          echo "Installing current code: uv pip install --system -e ."
-          uv pip install --system -e .
-
-          echo "Running: python -m github2gerrit.cli ${VARS_DEPENDABOT_PR_URL_1}"
-          python -m github2gerrit.cli "${VARS_DEPENDABOT_PR_URL_1}"
-
-          echo "✅ Dry-run CLI integration test completed successfully"
+          echo "✅ Pushed to Gerrit: ${change_url}"
           {
-            echo "CLI Integration test summary:"
-            echo "- Tested with external PR: ${VARS_DEPENDABOT_PR_URL_1}"
-            echo "- Target Gerrit: gerrit.linuxfoundation.org"
-            echo "- Target Project: sandbox"
-            echo "- Mode: DRY_RUN (validation only)"
+            echo "## Live Gerrit Push ✅"
+            echo "- Source PR: ${PR_URL}"
+            echo "- Gerrit change: ${change_url}"
           } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: "Test Action integration with Gerrit"
-        shell: bash
-        env:
-          # GitHub context (needed for action operation)
-          # Note: Using READ_ONLY_GITHUB_TOKEN for cross-repository access to lfit/sandbox
-          # The default github.token only has permissions for the current repository
-          GITHUB_TOKEN: "${{ secrets.READ_ONLY_GITHUB_TOKEN }}"
-          GITHUB_EVENT_NAME: 'workflow_dispatch'
-          GITHUB_REPOSITORY: "${{ github.repository }}"
-          GITHUB_REPOSITORY_OWNER: "${{ github.repository_owner }}"
-          GITHUB_SERVER_URL: "${{ github.server_url }}"
-          GITHUB_RUN_ID: "${{ github.run_id }}"
-          GITHUB_SHA: "${{ github.sha }}"
-          # Gerrit configuration - force override of .gitreview
-          GERRIT_KNOWN_HOSTS: "${{ vars.GERRIT_KNOWN_HOSTS }}"
-          GERRIT_SSH_PRIVKEY_G2G: "${{ secrets.GERRIT_SSH_PRIVKEY_G2G }}"
-          GERRIT_SSH_USER_G2G: 'modesevenindustrialsolutions'
-          GERRIT_SSH_USER_G2G_EMAIL: 'mwatkins@linuxfoundation.org'
-          GERRIT_SERVER: 'gerrit.linuxfoundation.org'
-          GERRIT_PROJECT: 'sandbox'
-          GERRIT_SERVER_PORT: '29418'
-          DRY_RUN: 'false'
-          G2G_ENABLE_DERIVATION: 'false'
-          ALLOW_DUPLICATES: 'true'
-          PRESERVE_GITHUB_PRS: 'true'
-          G2G_VERBOSE: 'true'
-          FETCH_DEPTH: '50'
-          USE_PR_AS_COMMIT: 'true'
-          VARS_DEPENDABOT_PR_URL_2: ${{ vars.DEPENDABOT_PR_URL_2 }}
-          # lfit/sandbox has correct .gitreview pointing to LF Gerrit
-          # Force derivation to be disabled so our overrides take precedence
-        run: |
-          echo '🚀 Action Integration Test Summary'
-          echo "Target PR: ${VARS_DEPENDABOT_PR_URL_2}"
-
-          # Configure git with your identity
-          # Gerrit private SSH key is linked to this account
-          git config --global user.name "$GERRIT_SSH_USER_G2G"
-          git config --global user.email "$GERRIT_SSH_USER_G2G_EMAIL"
-
-          # Push to Gerrit
-          echo "Pushing change to Gerrit..."
-          python -m github2gerrit.cli "${VARS_DEPENDABOT_PR_URL_2}"
