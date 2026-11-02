@@ -1446,6 +1446,7 @@ def tls_server(
     other = _TlsAuthority(tmp_path, "other")
     server = _RecordingServer()
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_cert_chain(authority.cert_file, authority.key_file)
     server._httpd.socket = context.wrap_socket(
         server._httpd.socket, server_side=True
