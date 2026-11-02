@@ -201,7 +201,6 @@ SECRETS = {
 # ---------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason="#524: workflow not yet fixed")
 def test_no_step_sets_runner_default_variables() -> None:
     offenders = [
         (step.get("name", step.get("uses")), key)
@@ -212,7 +211,6 @@ def test_no_step_sets_runner_default_variables() -> None:
     assert offenders == []
 
 
-@pytest.mark.xfail(strict=True, reason="#524: workflow not yet fixed")
 def test_every_live_gerrit_step_authenticates_rest() -> None:
     live = [
         step
@@ -230,7 +228,6 @@ def test_every_live_gerrit_step_authenticates_rest() -> None:
         ), step["name"]
 
 
-@pytest.mark.xfail(strict=True, reason="#524: workflow not yet fixed")
 def test_no_step_reads_fixture_pr_urls_directly() -> None:
     readers = [
         step.get("name")
@@ -246,7 +243,6 @@ def test_no_step_reads_fixture_pr_urls_directly() -> None:
 # ---------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason="#524: workflow not yet fixed")
 def test_select_picks_open_dependabot_pr(tmp_path: Path) -> None:
     result = _run_step(
         tmp_path,
@@ -263,7 +259,6 @@ def test_select_picks_open_dependabot_pr(tmp_path: Path) -> None:
     assert "--repo lfit/sandbox" in calls
 
 
-@pytest.mark.xfail(strict=True, reason="#524: workflow not yet fixed")
 def test_select_fails_when_no_pr_is_open(tmp_path: Path) -> None:
     result = _run_step(tmp_path, SELECT_STEP, {"GH_TOKEN": "token"})
     assert result.returncode != 0
@@ -271,14 +266,12 @@ def test_select_fails_when_no_pr_is_open(tmp_path: Path) -> None:
     assert result.outputs == ""
 
 
-@pytest.mark.xfail(strict=True, reason="#524: workflow not yet fixed")
 def test_select_fails_without_token(tmp_path: Path) -> None:
     result = _run_step(tmp_path, SELECT_STEP, {}, {"STUB_GH_URL": PR_URL})
     assert result.returncode != 0
     assert result.recorded("gh_calls") is None
 
 
-@pytest.mark.xfail(strict=True, reason="#524: workflow not yet fixed")
 def test_select_overrides_skip_the_query(tmp_path: Path) -> None:
     other = "https://github.com/lfit/sandbox/pull/7"
     result = _run_step(
@@ -296,7 +289,6 @@ def test_select_overrides_skip_the_query(tmp_path: Path) -> None:
     assert result.recorded("gh_calls") is None
 
 
-@pytest.mark.xfail(strict=True, reason="#524: workflow not yet fixed")
 @pytest.mark.parametrize(
     "override",
     [
@@ -321,7 +313,6 @@ def test_select_rejects_foreign_override(tmp_path: Path, override: str) -> None:
 # ---------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason="#524: workflow not yet fixed")
 @pytest.mark.parametrize("name", [DRY_RUN_STEP, FAILURE_STEP, LIVE_STEP])
 def test_cli_runs_as_dispatch_on_push(tmp_path: Path, name: str) -> None:
     result = _run_step(
@@ -340,7 +331,6 @@ def test_cli_runs_as_dispatch_on_push(tmp_path: Path, name: str) -> None:
     assert result.recorded("python_args") == f"-m github2gerrit.cli {PR_URL}\n"
 
 
-@pytest.mark.xfail(strict=True, reason="#524: workflow not yet fixed")
 @pytest.mark.parametrize("name", [DRY_RUN_STEP, LIVE_STEP])
 def test_missing_http_password_fails(tmp_path: Path, name: str) -> None:
     secrets = {k: v for k, v in SECRETS.items() if k != "GERRIT_HTTP_PASSWORD"}
@@ -354,7 +344,6 @@ def test_missing_http_password_fails(tmp_path: Path, name: str) -> None:
     assert result.recorded("python_args") is None
 
 
-@pytest.mark.xfail(strict=True, reason="#524: workflow not yet fixed")
 @pytest.mark.parametrize("name", [DRY_RUN_STEP, LIVE_STEP])
 def test_anonymous_rest_call_fails(tmp_path: Path, name: str) -> None:
     result = _run_step(
@@ -367,7 +356,6 @@ def test_anonymous_rest_call_fails(tmp_path: Path, name: str) -> None:
     assert "ran anonymously" in result.stdout
 
 
-@pytest.mark.xfail(strict=True, reason="#524: workflow not yet fixed")
 def test_dry_run_requires_verified_authentication(tmp_path: Path) -> None:
     result = _run_step(
         tmp_path,
@@ -389,7 +377,6 @@ def test_dry_run_fails_when_cli_fails(tmp_path: Path) -> None:
     assert result.returncode != 0
 
 
-@pytest.mark.xfail(strict=True, reason="#524: workflow not yet fixed")
 def test_live_step_reports_change_url(tmp_path: Path) -> None:
     result = _run_step(
         tmp_path,
@@ -403,7 +390,6 @@ def test_live_step_reports_change_url(tmp_path: Path) -> None:
     assert result.outputs == ""
 
 
-@pytest.mark.xfail(strict=True, reason="#524: workflow not yet fixed")
 def test_live_step_fails_without_change_url(tmp_path: Path) -> None:
     result = _run_step(
         tmp_path,
@@ -415,7 +401,6 @@ def test_live_step_fails_without_change_url(tmp_path: Path) -> None:
     assert "no sandbox change URL" in result.stdout
 
 
-@pytest.mark.xfail(strict=True, reason="#524: workflow not yet fixed")
 def test_live_step_requires_a_rest_request(tmp_path: Path) -> None:
     result = _run_step(
         tmp_path,
@@ -427,7 +412,6 @@ def test_live_step_requires_a_rest_request(tmp_path: Path) -> None:
     assert "No Gerrit REST call ran authenticated" in result.stdout
 
 
-@pytest.mark.xfail(strict=True, reason="#524: workflow not yet fixed")
 def test_live_step_fails_without_push(tmp_path: Path) -> None:
     # Reconciliation can return an existing change's URL without pushing
     result = _run_step(
