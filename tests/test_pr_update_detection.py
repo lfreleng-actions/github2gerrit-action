@@ -24,6 +24,21 @@ from github2gerrit.models import GitHubContext
 from github2gerrit.models import PROperationMode
 
 
+# A message as the tool pushes it: the author's sign-off, the tool's own
+# trailers, then the tool's sign-off as the last line.
+_TOOL_PUSHED_MESSAGE = (
+    "Subject line\n"
+    "\n"
+    "Body paragraph.\n"
+    "\n"
+    "Signed-off-by: dependabot[bot] <support@github.com>\n"
+    "Change-Id: Iea06729623e55b95088451c9190549f021017837\n"
+    "GitHub-PR: https://github.com/lfit/sandbox/pull/70\n"
+    "GitHub-Hash: 93f114c3821a33e8\n"
+    "Signed-off-by: Matthew Watkins <mwatkins@linuxfoundation.org>\n"
+)
+
+
 class TestPROperationModeDetection:
     """Tests for PROperationMode detection in GitHubContext."""
 
@@ -510,7 +525,9 @@ class TestMetadataSync:
             "revisions": {
                 "rev1": {
                     "commit": {
-                        "message": "Old Gerrit Title\n\nOld body\n\nChange-Id: I1234567890abcdef"
+                        "message": _TOOL_PUSHED_MESSAGE.replace(
+                            "Subject line", "Old Gerrit Title"
+                        )
                     }
                 }
             },
@@ -539,7 +556,15 @@ class TestMetadataSync:
         # Verify update was attempted
         assert len(update_called) > 0
         assert "message" in update_called[0][1]
-        assert "Updated PR Title" in update_called[0][1]["message"]
+        put_message = update_called[0][1]["message"]
+        assert "Updated PR Title" in put_message
+        assert "Change-Id: Iea06729623e55b95088451c9190549f021017837" in (
+            put_message
+        )
+        assert "GitHub-PR: https://github.com/lfit/sandbox/pull/70" in (
+            put_message
+        )
+        assert "GitHub-Hash: 93f114c3821a33e8" in put_message
 
     def test_sync_skips_when_titles_match(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -629,6 +654,355 @@ class TestMetadataSync:
 
         # Verify no update was called
         assert len(update_called) == 0
+
+
+class TestSplitPreservedMetadata:
+    """Tests for trailer extraction when no G2G metadata block exists."""
+
+    def test_keeps_every_trailer_of_pushed_message(
+        self, tmp_path: Path
+    ) -> None:
+        """Verify all five trailers survive, in order, with no G2G block."""
+        orch = Orchestrator(workspace=tmp_path)
+
+        metadata, trailers = orch._split_preserved_metadata(
+            _TOOL_PUSHED_MESSAGE
+        )
+
+        assert metadata == ""
+        assert trailers == (
+            "Signed-off-by: dependabot[bot] <support@github.com>\n"
+            "Change-Id: Iea06729623e55b95088451c9190549f021017837\n"
+            "GitHub-PR: https://github.com/lfit/sandbox/pull/70\n"
+            "GitHub-Hash: 93f114c3821a33e8\n"
+            "Signed-off-by: Matthew Watkins <mwatkins@linuxfoundation.org>\n"
+        )
+
+    def test_keeps_issue_id_and_co_author_trailers(
+        self, tmp_path: Path
+    ) -> None:
+        """Verify Issue-ID and Co-authored-by stay in the trailer block."""
+        orch = Orchestrator(workspace=tmp_path)
+        message = (
+            "Subject line\n"
+            "\n"
+            "Body paragraph.\n"
+            "\n"
+            "Issue-ID: TEST-123\n"
+            "Co-authored-by: Example Agent <agent@example.org>\n"
+            "Change-Id: I1234567890abcdef1234567890abcdef12345678\n"
+            "Signed-off-by: Example Dev <dev@example.org>"
+        )
+
+        metadata, trailers = orch._split_preserved_metadata(message)
+
+        assert metadata == ""
+        assert trailers == (
+            "Issue-ID: TEST-123\n"
+            "Co-authored-by: Example Agent <agent@example.org>\n"
+            "Change-Id: I1234567890abcdef1234567890abcdef12345678\n"
+            "Signed-off-by: Example Dev <dev@example.org>"
+        )
+
+    def test_message_without_trailers(self, tmp_path: Path) -> None:
+        """Verify a message without trailers yields empty parts."""
+        orch = Orchestrator(workspace=tmp_path)
+
+        result = orch._split_preserved_metadata(
+            "Subject line\n\nBody paragraph.\n"
+        )
+
+        assert result == ("", "")
+
+    def test_keeps_trailers_above_unmanaged_trailer_at_end(
+        self, tmp_path: Path
+    ) -> None:
+        """Verify an unmanaged last trailer does not end the block."""
+        orch = Orchestrator(workspace=tmp_path)
+        message = (
+            "Subject line\n"
+            "\n"
+            "Body paragraph.\n"
+            "\n"
+            "Change-Id: Iea06729623e55b95088451c9190549f021017837\n"
+            "GitHub-PR: https://github.com/lfit/sandbox/pull/70\n"
+            "GitHub-Hash: 93f114c3821a33e8\n"
+            "Bug: 12345\n"
+        )
+
+        metadata, trailers = orch._split_preserved_metadata(message)
+
+        assert metadata == ""
+        assert trailers == (
+            "Change-Id: Iea06729623e55b95088451c9190549f021017837\n"
+            "GitHub-PR: https://github.com/lfit/sandbox/pull/70\n"
+            "GitHub-Hash: 93f114c3821a33e8\n"
+            "Bug: 12345\n"
+        )
+
+    def test_keeps_trailers_around_unmanaged_trailer(
+        self, tmp_path: Path
+    ) -> None:
+        """Verify an unmanaged trailer before the sign-off is kept."""
+        orch = Orchestrator(workspace=tmp_path)
+        message = (
+            "Subject line\n"
+            "\n"
+            "Body paragraph.\n"
+            "\n"
+            "Change-Id: Iea06729623e55b95088451c9190549f021017837\n"
+            "GitHub-PR: https://github.com/lfit/sandbox/pull/70\n"
+            "GitHub-Hash: 93f114c3821a33e8\n"
+            "Reviewed-by: Example Reviewer <reviewer@example.org>\n"
+            "Signed-off-by: Matthew Watkins <mwatkins@linuxfoundation.org>\n"
+        )
+
+        metadata, trailers = orch._split_preserved_metadata(message)
+
+        assert metadata == ""
+        assert trailers == (
+            "Change-Id: Iea06729623e55b95088451c9190549f021017837\n"
+            "GitHub-PR: https://github.com/lfit/sandbox/pull/70\n"
+            "GitHub-Hash: 93f114c3821a33e8\n"
+            "Reviewed-by: Example Reviewer <reviewer@example.org>\n"
+            "Signed-off-by: Matthew Watkins <mwatkins@linuxfoundation.org>\n"
+        )
+
+    def test_keeps_trailers_across_blank_line_before_signoff(
+        self, tmp_path: Path
+    ) -> None:
+        """Verify a blank line above the final sign-off is crossed."""
+        orch = Orchestrator(workspace=tmp_path)
+        message = (
+            "Subject line\n"
+            "\n"
+            "Body paragraph.\n"
+            "\n"
+            "Change-Id: Iea06729623e55b95088451c9190549f021017837\n"
+            "GitHub-Hash: 93f114c3821a33e8\n"
+            "Bug: 12345\n"
+            "\n"
+            "Signed-off-by: Matthew Watkins <mwatkins@linuxfoundation.org>"
+        )
+
+        metadata, trailers = orch._split_preserved_metadata(message)
+
+        assert metadata == ""
+        assert trailers == (
+            "Change-Id: Iea06729623e55b95088451c9190549f021017837\n"
+            "GitHub-Hash: 93f114c3821a33e8\n"
+            "Bug: 12345\n"
+            "\n"
+            "Signed-off-by: Matthew Watkins <mwatkins@linuxfoundation.org>"
+        )
+
+    def test_keeps_trailer_continuation_line(self, tmp_path: Path) -> None:
+        """Verify a folded trailer value stays with its trailer."""
+        orch = Orchestrator(workspace=tmp_path)
+        message = (
+            "Subject line\n"
+            "\n"
+            "Body paragraph.\n"
+            "\n"
+            "Change-Id: Iea06729623e55b95088451c9190549f021017837\n"
+            "Bug: a long value that\n"
+            " continues on the next line\n"
+            "Signed-off-by: Example Dev <dev@example.org>"
+        )
+
+        metadata, trailers = orch._split_preserved_metadata(message)
+
+        assert metadata == ""
+        assert trailers == (
+            "Change-Id: Iea06729623e55b95088451c9190549f021017837\n"
+            "Bug: a long value that\n"
+            " continues on the next line\n"
+            "Signed-off-by: Example Dev <dev@example.org>"
+        )
+
+    def test_prose_last_paragraph_has_no_trailers(self, tmp_path: Path) -> None:
+        """Verify a prose last paragraph yields no trailers."""
+        orch = Orchestrator(workspace=tmp_path)
+        message = (
+            "Subject line\n"
+            "\n"
+            "Change-Id: Iea06729623e55b95088451c9190549f021017837\n"
+            "\n"
+            "The walk stops here: this paragraph is prose.\n"
+        )
+
+        result = orch._split_preserved_metadata(message)
+
+        assert result == ("", "")
+
+    def test_prose_line_above_trailers_ends_block(self, tmp_path: Path) -> None:
+        """Verify the walk stops at a prose line directly above trailers."""
+        orch = Orchestrator(workspace=tmp_path)
+        message = (
+            "Subject line\n"
+            "\n"
+            "Signed-off-by: Earlier Text <early@example.org>\n"
+            "Closing prose line.\n"
+            "Change-Id: Iea06729623e55b95088451c9190549f021017837\n"
+            "Signed-off-by: Example Dev <dev@example.org>"
+        )
+
+        metadata, trailers = orch._split_preserved_metadata(message)
+
+        assert metadata == ""
+        assert trailers == (
+            "Change-Id: Iea06729623e55b95088451c9190549f021017837\n"
+            "Signed-off-by: Example Dev <dev@example.org>"
+        )
+
+    def test_subject_is_never_a_trailer(self, tmp_path: Path) -> None:
+        """Verify a trailer-shaped subject is not taken as a trailer."""
+        orch = Orchestrator(workspace=tmp_path)
+        message = (
+            "Fix: Keep every trailer\n"
+            "\n"
+            "Signed-off-by: Example Dev <dev@example.org>"
+        )
+
+        result = orch._split_preserved_metadata(message)
+
+        assert result == ("", "Signed-off-by: Example Dev <dev@example.org>")
+
+    @pytest.mark.parametrize("key_line", ["Bug: ", "Bug:"])
+    def test_keeps_folded_trailer_with_bare_key(
+        self, tmp_path: Path, key_line: str
+    ) -> None:
+        """Verify a folded value with an empty first line is kept."""
+        orch = Orchestrator(workspace=tmp_path)
+        message = (
+            "Subject line\n"
+            "\n"
+            "Body paragraph.\n"
+            "\n"
+            "Change-Id: Iea06729623e55b95088451c9190549f021017837\n"
+            f"{key_line}\n"
+            "  12345\n"
+            "Signed-off-by: Example Dev <dev@example.org>"
+        )
+
+        metadata, trailers = orch._split_preserved_metadata(message)
+
+        assert metadata == ""
+        assert trailers == (
+            "Change-Id: Iea06729623e55b95088451c9190549f021017837\n"
+            f"{key_line}\n"
+            "  12345\n"
+            "Signed-off-by: Example Dev <dev@example.org>"
+        )
+
+    def test_keeps_change_id_without_space(self, tmp_path: Path) -> None:
+        """Verify a Change-Id with no space after the colon is kept."""
+        orch = Orchestrator(workspace=tmp_path)
+        message = (
+            "Subject line\n"
+            "\n"
+            "Body paragraph.\n"
+            "\n"
+            "Change-Id:Iea06729623e55b95088451c9190549f021017837\n"
+            "Signed-off-by: Example Dev <dev@example.org>"
+        )
+
+        metadata, trailers = orch._split_preserved_metadata(message)
+
+        assert metadata == ""
+        assert trailers == (
+            "Change-Id:Iea06729623e55b95088451c9190549f021017837\n"
+            "Signed-off-by: Example Dev <dev@example.org>"
+        )
+
+    @pytest.mark.parametrize(
+        "bug_line",
+        ["Bug:\t12345", "Bug:12345", "Bug :12345", "Bug\t: 12345"],
+    )
+    def test_keeps_unmanaged_trailer_separator_forms(
+        self, tmp_path: Path, bug_line: str
+    ) -> None:
+        """Verify git's separator forms do not end the trailer walk."""
+        orch = Orchestrator(workspace=tmp_path)
+        message = (
+            "Subject line\n"
+            "\n"
+            "Body paragraph.\n"
+            "\n"
+            "Change-Id: Iea06729623e55b95088451c9190549f021017837\n"
+            f"{bug_line}\n"
+            "Signed-off-by: Example Dev <dev@example.org>"
+        )
+
+        metadata, trailers = orch._split_preserved_metadata(message)
+
+        assert metadata == ""
+        assert trailers == (
+            "Change-Id: Iea06729623e55b95088451c9190549f021017837\n"
+            f"{bug_line}\n"
+            "Signed-off-by: Example Dev <dev@example.org>"
+        )
+
+
+class TestMetadataUpdateFailureLogging:
+    """Tests for diagnosing a rejected Gerrit metadata update."""
+
+    def test_rejected_update_logs_status_and_body(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Verify a rejected PUT logs the HTTP status and Gerrit's reply."""
+        import requests
+
+        from github2gerrit.gerrit_rest import GerritRestError
+
+        orch = Orchestrator(workspace=tmp_path)
+        gerrit = GerritInfo(
+            host="gerrit.example.org",
+            port=29418,
+            project="test/project",
+        )
+
+        response = requests.Response()
+        response.status_code = 409
+        response._content = b"missing Change-Id footer"
+
+        def failing_put(path: str, data: object) -> None:
+            http_exc = requests.HTTPError(response=response)
+            raise GerritRestError(
+                "Gerrit REST PUT /changes/x/message failed with HTTP 409",
+                status=409,
+            ) from http_exc
+
+        mock_client = Mock()
+        mock_client.is_authenticated = True
+        mock_client.put = failing_put
+        monkeypatch.setattr(
+            "github2gerrit.gerrit_rest.build_client_for_host",
+            lambda host: mock_client,
+        )
+        monkeypatch.setattr(
+            orch,
+            "_get_gerrit_change_details",
+            lambda *args, **kwargs: None,
+        )
+
+        with caplog.at_level("WARNING", logger="github2gerrit.core"):
+            ok = orch._update_gerrit_change_metadata(
+                gerrit, "I1234567890abcdef", title="New title"
+            )
+
+        assert ok is False
+        failure_logs = [
+            r.getMessage()
+            for r in caplog.records
+            if "Failed to update Gerrit change metadata" in r.getMessage()
+        ]
+        assert failure_logs
+        assert "409" in failure_logs[0]
+        assert "missing Change-Id footer" in failure_logs[0]
 
 
 class TestG2GMetadataBlock:

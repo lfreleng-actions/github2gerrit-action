@@ -344,6 +344,45 @@ def _change_api_id(project: str, branch: str | None, change_id: str) -> str:
     )
 
 
+_REST_FAILURE_BODY_LIMIT = 500
+
+# A git trailer line, as git interpret-trailers reads one: a token key,
+# optional spaces or tabs, the ":" separator, then anything, since the
+# value may follow with or without whitespace or be folded onto the
+# continuation lines below.
+_TRAILER_LINE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9-]*[ \t]*:")
+
+
+def _describe_rest_failure(exc: BaseException) -> tuple[int | None, str]:
+    """Return the HTTP status and response body behind a REST failure.
+
+    ``GerritRestError`` carries the status but not the body; the body
+    stays on the ``requests`` response of the error it was raised from.
+    Either part is empty when the exception chain does not expose it.
+    """
+    status = getattr(exc, "status", None)
+    body = ""
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        response = getattr(current, "response", None)
+        if response is not None:
+            if status is None:
+                code = getattr(response, "status_code", None)
+                if isinstance(code, int):
+                    status = code
+            if not body:
+                try:
+                    body = str(getattr(response, "text", "") or "").strip()
+                except Exception:
+                    body = ""
+        current = current.__cause__ or current.__context__
+    if len(body) > _REST_FAILURE_BODY_LIMIT:
+        body = body[:_REST_FAILURE_BODY_LIMIT] + "..."
+    return (status if isinstance(status, int) else None), body
+
+
 def _is_valid_change_id(value: str) -> bool:
     # Gerrit Change-Id should match I<40-hex-chars> format
     # Be more strict to avoid accepting invalid Change-IDs
@@ -580,7 +619,15 @@ class Orchestrator:
                 return False
 
         except Exception as exc:
-            log.warning("Failed to update Gerrit change metadata: %s", exc)
+            status, body = _describe_rest_failure(exc)
+            log.warning(
+                "Failed to update Gerrit change metadata for %s "
+                "(HTTP status: %s, Gerrit response: %s): %s",
+                change_id,
+                status if status is not None else "unknown",
+                body or "unavailable",
+                exc,
+            )
             return False
 
     @staticmethod
@@ -634,15 +681,30 @@ class Orchestrator:
             # No trailers found, G2G metadata extends to end
             return current_msg[g2g_start:], ""
 
-        # No G2G metadata, just extract trailers
+        # No G2G metadata: the trailers are the run of trailer-shaped
+        # lines at the end of the message. Shape, not a prefix list,
+        # decides, because unmanaged trailers (Bug:, Reviewed-by:) can
+        # follow Change-Id. Blank lines inside the run are kept; the
+        # subject (line 0) is never part of it.
         lines = current_msg.split("\n")
-        for i in range(len(lines) - 1, -1, -1):
-            line = lines[i].strip()
-            if line and any(
-                line.startswith(prefix) for prefix in trailer_prefixes
-            ):
-                return "", "\n".join(lines[i:])
-        return "", ""
+        block_start = -1
+        continuation = False
+        for i in range(len(lines) - 1, 0, -1):
+            line = lines[i].rstrip()
+            if not line:
+                if continuation:
+                    break
+                continue
+            if line[0].isspace():
+                continuation = True
+                continue
+            if not _TRAILER_LINE_RE.match(line):
+                break
+            block_start = i
+            continuation = False
+        if block_start == -1:
+            return "", ""
+        return "", "\n".join(lines[block_start:])
 
     @staticmethod
     def _assemble_updated_message(
