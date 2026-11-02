@@ -455,10 +455,6 @@ class TestVerifyPatchsetCreation:
 class TestMetadataSync:
     """Tests for Gerrit change metadata sync functionality."""
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="Fallback trailer split keeps only the last trailer line",
-    )
     def test_sync_updates_title_when_different(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -663,10 +659,6 @@ class TestMetadataSync:
 class TestSplitPreservedMetadata:
     """Tests for trailer extraction when no G2G metadata block exists."""
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="Fallback trailer split keeps only the last trailer line",
-    )
     def test_keeps_every_trailer_of_pushed_message(
         self, tmp_path: Path
     ) -> None:
@@ -686,10 +678,6 @@ class TestSplitPreservedMetadata:
             "Signed-off-by: Matthew Watkins <mwatkins@linuxfoundation.org>\n"
         )
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="Fallback trailer split keeps only the last trailer line",
-    )
     def test_keeps_issue_id_and_co_author_trailers(
         self, tmp_path: Path
     ) -> None:
@@ -726,10 +714,6 @@ class TestSplitPreservedMetadata:
 
         assert result == ("", "")
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="Fallback trailer split stops at an unmanaged trailer",
-    )
     def test_keeps_trailers_above_unmanaged_trailer_at_end(
         self, tmp_path: Path
     ) -> None:
@@ -756,10 +740,6 @@ class TestSplitPreservedMetadata:
             "Bug: 12345\n"
         )
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="Fallback trailer split stops at an unmanaged trailer",
-    )
     def test_keeps_trailers_around_unmanaged_trailer(
         self, tmp_path: Path
     ) -> None:
@@ -788,10 +768,6 @@ class TestSplitPreservedMetadata:
             "Signed-off-by: Matthew Watkins <mwatkins@linuxfoundation.org>\n"
         )
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="Fallback trailer split keeps only the last trailer line",
-    )
     def test_keeps_trailers_across_blank_line_before_signoff(
         self, tmp_path: Path
     ) -> None:
@@ -820,10 +796,6 @@ class TestSplitPreservedMetadata:
             "Signed-off-by: Matthew Watkins <mwatkins@linuxfoundation.org>"
         )
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="Fallback trailer split ignores continuation lines",
-    )
     def test_keeps_trailer_continuation_line(self, tmp_path: Path) -> None:
         """Verify a folded trailer value stays with its trailer."""
         orch = Orchestrator(workspace=tmp_path)
@@ -848,10 +820,6 @@ class TestSplitPreservedMetadata:
             "Signed-off-by: Example Dev <dev@example.org>"
         )
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="Fallback trailer split crosses a prose paragraph",
-    )
     def test_prose_last_paragraph_has_no_trailers(self, tmp_path: Path) -> None:
         """Verify a prose last paragraph yields no trailers."""
         orch = Orchestrator(workspace=tmp_path)
@@ -867,10 +835,6 @@ class TestSplitPreservedMetadata:
 
         assert result == ("", "")
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="Fallback trailer split keeps only the last trailer line",
-    )
     def test_prose_line_above_trailers_ends_block(self, tmp_path: Path) -> None:
         """Verify the walk stops at a prose line directly above trailers."""
         orch = Orchestrator(workspace=tmp_path)
@@ -904,10 +868,6 @@ class TestSplitPreservedMetadata:
 
         assert result == ("", "Signed-off-by: Example Dev <dev@example.org>")
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="Fallback trailer split rejects a bare trailer key",
-    )
     @pytest.mark.parametrize("key_line", ["Bug: ", "Bug:"])
     def test_keeps_folded_trailer_with_bare_key(
         self, tmp_path: Path, key_line: str
@@ -935,7 +895,6 @@ class TestSplitPreservedMetadata:
             "Signed-off-by: Example Dev <dev@example.org>"
         )
 
-    @pytest.mark.xfail(strict=True, reason="trailer walk needs a space")
     def test_keeps_change_id_without_space(self, tmp_path: Path) -> None:
         """Verify a Change-Id with no space after the colon is kept."""
         orch = Orchestrator(workspace=tmp_path)
@@ -956,7 +915,6 @@ class TestSplitPreservedMetadata:
             "Signed-off-by: Example Dev <dev@example.org>"
         )
 
-    @pytest.mark.xfail(strict=True, reason="trailer walk needs a space")
     @pytest.mark.parametrize(
         "bug_line",
         ["Bug:\t12345", "Bug:12345", "Bug :12345", "Bug\t: 12345"],
@@ -989,10 +947,6 @@ class TestSplitPreservedMetadata:
 class TestMetadataUpdateFailureLogging:
     """Tests for diagnosing a rejected Gerrit metadata update."""
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="Failure log omits Gerrit's response body",
-    )
     def test_rejected_update_logs_status_and_body(
         self,
         tmp_path: Path,
