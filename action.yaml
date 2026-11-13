@@ -355,10 +355,12 @@ runs:
         # The uv the step above installed from the lockfile; nothing
         # else on the runner's PATH is consulted for it.
         UV_DIR: ${{ steps.setup-uv.outputs.uv_dir }}
-        # The interpreter the step above set up, named outright so uv
-        # builds the environment from it rather than from whatever else
-        # it might discover on the runner.
-        UV_PYTHON: ${{ steps.setup-python.outputs.python-path }}
+        # The interpreter the setup-python step installed, passed to uv
+        # as --python below so it builds the environment from it rather
+        # than from whatever else it might discover on the runner. Not
+        # as UV_PYTHON: an option on the command line is the one thing
+        # the caller's environment cannot override or supply instead.
+        PYTHON: ${{ steps.setup-python.outputs.python-path }}
       run: |
         # Install github2gerrit from this action's own checkout
         set -euo pipefail
@@ -417,7 +419,8 @@ runs:
         # this sync installs has a wheel for the pinned Python, so a
         # dependency update that adds a source-only distribution fails
         # there rather than here.
-        uv sync --directory "${src}" --frozen --no-build \
+        uv sync --directory "${src}" --python "${PYTHON}" \
+          --frozen --no-build \
           --no-dev --group build --no-install-project
 
         # hatch-vcs takes the version from git metadata, which the

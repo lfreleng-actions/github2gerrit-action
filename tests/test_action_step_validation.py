@@ -1289,8 +1289,17 @@ class TestActionStepValidation:
         # single sync that builds nothing; the project itself is then
         # built offline with that backend, so nothing is fetched that
         # the lockfile does not name.
-        assert 'uv sync --directory "${src}" --frozen --no-build' in script
+        assert 'uv sync --directory "${src}" --python "${PYTHON}"' in script
+        assert "--frozen --no-build" in script
         assert script.count("uv sync") == 1
+        # The interpreter setup-python installed reaches uv as an option,
+        # which nothing in the caller's environment can override, rather
+        # than as UV_PYTHON, which a caller's environment could supply.
+        assert install_step["env"]["PYTHON"] == (
+            "${{ steps.setup-python.outputs.python-path }}"
+        )
+        assert "UV_PYTHON" not in install_step["env"]
+        assert "UV_PYTHON" not in script
         assert "--no-build-isolation-package" not in script
         assert "--no-dev --group build --no-install-project" in script
         assert 'uv pip install --directory "${src}"' in script
