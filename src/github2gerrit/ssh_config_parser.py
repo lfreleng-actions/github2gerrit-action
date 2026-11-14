@@ -163,7 +163,7 @@ class SSHConfig:
                     "line_num": line_num,
                 }
 
-            elif keyword in [
+            elif current_entry and keyword in [
                 "user",
                 "port",
                 "hostname",
@@ -171,8 +171,7 @@ class SSHConfig:
                 "canonicalizehostname",
             ]:
                 # Store directive in current entry
-                if current_entry:
-                    current_entry[keyword] = parts[1]
+                current_entry[keyword] = parts[1]
 
         # Don't forget the last entry
         if current_entry:

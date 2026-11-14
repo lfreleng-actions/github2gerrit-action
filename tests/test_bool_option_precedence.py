@@ -176,7 +176,9 @@ def test_every_boolean_known_key_is_configurable_or_exempt() -> None:
     boolean_keys = {
         p.envvar
         for p in _cli_params().values()
-        if p.type.name == "boolean"
+        # Typer 0.29's own option class has no ``type``; ``is_bool_flag``
+        # exists on it and on click's, and every boolean here is a flag.
+        if p.is_bool_flag
         and isinstance(p.envvar, str)
         and p.envvar in KNOWN_KEYS
     }
