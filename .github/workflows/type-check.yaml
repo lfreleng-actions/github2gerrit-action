@@ -52,6 +52,6 @@ jobs:
       # persist-credentials: false.
       - name: 'Run the mypy hook'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/standalone-linting-action@a00b2febdcb6da5332f77e829dfdc131a91b8fce  # v0.10.1
+        uses: lfreleng-actions/standalone-linting-action@0a60cf5241a83be396fdd56bb63e9be11dd90b06  # v0.10.2
         with:
           hooks: 'mypy'
