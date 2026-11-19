@@ -1508,6 +1508,7 @@ class Orchestrator:
         from .commit_rules import parse_commit_rules_json
         from .commit_rules import resolve_rules
         from .gitutils import _parse_trailers
+        from .trailers import find_trailer_boundary
 
         # Parse existing trailers if preserving
         existing_trailers = {}
@@ -1517,11 +1518,10 @@ class Orchestrator:
         # Split message into body and trailers
         lines = base_message.splitlines()
 
-        # Find where trailers start using generic "Key: value" detection
-        # aligned with _parse_trailers() in gitutils.py: a trailer block
-        # must be preceded by a blank line to avoid matching conventional
-        # commit subjects like "fix: something" as trailers.
-        trailer_start = self._find_trailer_boundary(lines)
+        # Find where trailers start, using the rule _parse_trailers() in
+        # gitutils.py shares: a trailer block must be preceded by a blank
+        # line, so a subject like "fix: something" is not a trailer.
+        trailer_start = find_trailer_boundary(lines)
 
         # Body is everything before trailers
         body_lines = lines[:trailer_start]
@@ -1563,38 +1563,6 @@ class Orchestrator:
             final_message = base_body
 
         return final_message
-
-    @staticmethod
-    def _find_trailer_boundary(lines: list[str]) -> int:
-        """Return the line index where the trailer block starts.
-
-        A trailer block must be preceded by a blank line to avoid matching
-        conventional commit subjects like "fix: something" as trailers.
-        """
-        trailer_start = len(lines)
-        in_trailer_block = True
-
-        for i in range(len(lines) - 1, -1, -1):
-            line = lines[i].strip()
-
-            if not line and in_trailer_block:
-                # Found blank line before trailer block — accept it
-                trailer_start = i + 1
-                break
-            elif not line:
-                in_trailer_block = False
-            elif in_trailer_block and ":" in line:
-                key, val = line.split(":", 1)
-                k = key.strip()
-                v = val.strip()
-                if k and v and not k.startswith((" ", "\t")):
-                    continue
-                else:
-                    in_trailer_block = False
-            elif in_trailer_block:
-                in_trailer_block = False
-
-        return trailer_start
 
     def _collect_ordered_trailers(
         self,
