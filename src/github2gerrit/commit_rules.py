@@ -242,7 +242,10 @@ def parse_commit_rules_json(json_str: str) -> CommitRulesConfig | None:
 
     try:
         data = json.loads(json_str)
-    except json.JSONDecodeError as exc:
+    except (ValueError, RecursionError) as exc:
+        # JSONDecodeError is a ValueError. json.loads also raises a bare
+        # ValueError for an integer longer than sys.get_int_max_str_digits()
+        # and RecursionError for arrays or objects nested too deeply.
         log.warning(
             "⚠️  Warning: COMMIT_RULES_JSON was not valid JSON "
             "(parse error: %s)",
