@@ -89,20 +89,58 @@ def test_has_trailer_any_value_and_specific():
     assert not has_trailer(msg, "X", "3")
 
 
+@pytest.mark.xfail(strict=True, reason="add_trailers splits the block")
 def test_add_trailers_deduplicates_and_appends():
     base = "Title\n\nBody."
     out = add_trailers(base, {"A": "1", "B": "2"})
     again = add_trailers(out, {"A": "1", "C": "3"})
 
-    # Relaxed: older parser logic may ignore earlier duplicate prevention.
-    # Assert presence and single occurrence rather than dict indexing.
-    assert "A: 1" in again
-    assert "B: 2" in again
-    assert "C: 3" in again
+    assert parse_trailers(again) == {"A": ["1"], "B": ["2"], "C": ["3"]}
     assert again.count("A: 1") == 1
-    assert again.count("B: 2") == 1
-    # Ensure blank line separation preserved
-    assert "\n\nA: 1" in again
+    assert again == "Title\n\nBody.\n\nA: 1\nB: 2\nC: 3\n"
+
+
+@pytest.mark.xfail(strict=True, reason="add_trailers splits the block")
+def test_add_trailers_joins_existing_trailer_block():
+    msg = (
+        "Fix the widget\n\nLonger explanation.\n\n"
+        "Change-Id: I0123456789abcdef0123456789abcdef01234567\n"
+        "Signed-off-by: A Dev <a@example.org>\n"
+    )
+    before = parse_trailers(msg)
+    out = add_trailers(msg, {"GitHub-PR": "https://github.com/o/r/pull/7"})
+    after = parse_trailers(out)
+
+    for key, values in before.items():
+        assert after[key] == values
+    assert after["GitHub-PR"] == ["https://github.com/o/r/pull/7"]
+    assert extract_change_ids(out) == [
+        "I0123456789abcdef0123456789abcdef01234567"
+    ]
+    assert out.endswith(
+        "Signed-off-by: A Dev <a@example.org>\n"
+        "GitHub-PR: https://github.com/o/r/pull/7\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "msg",
+    [
+        "fix: something",
+        "Fix the widget: handle colons",
+        "Title\n\nBody.",
+        "Title\n\nSee: notes\nand more prose\n",
+    ],
+)
+def test_add_trailers_starts_new_block_without_trailer_block(msg):
+    out = add_trailers(msg, {"A": "1"})
+    assert out == msg.rstrip() + "\n\nA: 1\n"
+
+
+def test_add_trailers_skips_trailer_already_present():
+    msg = "Title\n\nBody.\n\nChange-Id: I1\nSigned-off-by: A <a@b.c>\n"
+    out = add_trailers(msg, {"Change-Id": "I1"})
+    assert out.splitlines() == msg.splitlines()
 
 
 # ---------------------------------------------------------------------------
@@ -175,14 +213,13 @@ def test_compute_jaccard_similarity_partial_overlap():
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.xfail(strict=True, reason="add_trailers splits the block")
 def test_parse_then_add_trailers_integration():
     original = "T\n\nA: 1\n"
     added = add_trailers(original, {"A": "1", "B": "2"})
 
-    # Do not rely on trailer parsing behavior specifics; assert textual
-    # presence.
-    assert "A: 1" in added
-    assert "B: 2" in added
+    assert added == "T\n\nA: 1\nB: 2\n"
+    assert parse_trailers(added) == {"A": ["1"], "B": ["2"]}
     meta = extract_github_metadata(added + "GitHub-Hash: h\n")
     assert meta["GitHub-Hash"] == "h"
 
