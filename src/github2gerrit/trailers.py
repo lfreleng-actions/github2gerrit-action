@@ -28,6 +28,40 @@ KNOWN_TRAILER_KEYS = {
 }
 
 
+def find_trailer_boundary(lines: list[str]) -> int:
+    """Return the line index where the trailer block starts.
+
+    The block is the run of "Key: value" lines at the end of the
+    message, and it must be preceded by a blank line so that a
+    conventional commit subject such as "fix: something" is not read
+    as a trailer. Returns ``len(lines)`` when the message has no
+    trailer block.
+    """
+    trailer_start = len(lines)
+    in_trailer_block = True
+
+    for i in range(len(lines) - 1, -1, -1):
+        line = lines[i].strip()
+
+        if not line and in_trailer_block:
+            trailer_start = i + 1
+            break
+        elif not line:
+            in_trailer_block = False
+        elif in_trailer_block and ":" in line:
+            key, val = line.split(":", 1)
+            k = key.strip()
+            v = val.strip()
+            if k and v and not k.startswith((" ", "\t")):
+                continue
+            else:
+                in_trailer_block = False
+        elif in_trailer_block:
+            in_trailer_block = False
+
+    return trailer_start
+
+
 def parse_trailers(commit_message: str) -> dict[str, list[str]]:
     """
     Parse Git-style trailers from a commit message.
@@ -135,6 +169,11 @@ def add_trailers(commit_message: str, new_trailers: dict[str, str]) -> str:
     """
     Add trailers to a commit message, avoiding duplicates.
 
+    When the message already ends in a trailer block (see
+    find_trailer_boundary), the new trailers join that block, so
+    parse_trailers still finds the existing ones. Otherwise they start
+    a new block after one blank line.
+
     Args:
         commit_message: Original commit message
         new_trailers: Dictionary of trailers to add (key -> value)
@@ -155,11 +194,15 @@ def add_trailers(commit_message: str, new_trailers: dict[str, str]) -> str:
             to_add.append(f"{key}: {value}")
 
     if to_add:
-        if msg and not msg.endswith("\n"):
-            msg += "\n"
-        if not msg.endswith("\n\n"):
-            msg += "\n"
-        msg += "\n".join(to_add) + "\n"
+        lines = msg.splitlines()
+        has_block = find_trailer_boundary(lines) < len(lines)
+        if not msg:
+            separator = ""
+        elif has_block:
+            separator = "\n"
+        else:
+            separator = "\n\n"
+        msg += separator + "\n".join(to_add) + "\n"
 
     return msg
 

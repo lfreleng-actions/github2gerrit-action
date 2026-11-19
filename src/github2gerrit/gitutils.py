@@ -21,6 +21,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from .trailers import find_trailer_boundary
 from .utils import log_exception_conditionally
 
 
@@ -721,38 +722,7 @@ def _parse_trailers(text: str) -> dict[str, list[str]]:
     trailers: dict[str, list[str]] = {}
     lines = text.splitlines()
 
-    # Find the start of the trailer block by working backwards
-    # Trailers must be at the end, separated by a blank line from the body
-    trailer_start = len(lines)
-    in_trailer_block = True
-
-    for i in range(len(lines) - 1, -1, -1):
-        line = lines[i].strip()
-
-        if not line and in_trailer_block:
-            # Found blank line, trailers end here
-            trailer_start = i + 1
-            break
-        elif not line:
-            # Blank line in middle, not in trailer block anymore
-            in_trailer_block = False
-            trailer_start = len(lines)
-        elif in_trailer_block and ":" in line:
-            # Potential trailer line
-            key, val = line.split(":", 1)
-            k = key.strip()
-            v = val.strip()
-            if k and v and not k.startswith(" ") and not k.startswith("\t"):
-                # Valid trailer format
-                continue
-            else:
-                # Invalid trailer format, stop looking
-                in_trailer_block = False
-                trailer_start = len(lines)
-        elif in_trailer_block:
-            # Non-trailer line in what we thought was trailer block
-            in_trailer_block = False
-            trailer_start = len(lines)
+    trailer_start = find_trailer_boundary(lines)
 
     # Parse only the trailer section
     for i in range(trailer_start, len(lines)):
