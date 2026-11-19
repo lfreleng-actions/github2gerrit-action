@@ -143,6 +143,33 @@ caller at a fork or branch runs that code, with no further input:
 The action ignores the deprecated `USE_LOCAL_ACTION` input, which once
 selected this over the PyPI release.
 
+## Fuzzing
+
+Three [Atheris](https://github.com/google/atheris) harnesses in
+`tests/fuzzing/` hold the parsers that read text this tool does not
+control to their documented contracts:
+
+- `fuzz_reconciliation_text.py`: commit message trailers, the Change-Id
+  mapping comment and `@github2gerrit` commands
+- `fuzz_gerrit_text.py`: comment sanitising, pull request body filtering
+  and the normalisers used for similarity matching
+- `fuzz_config_files.py`: `.gitreview`, `.netrc` and `COMMIT_RULES_JSON`
+
+Each harness docstring quotes the contracts it checks. Atheris is not a
+project dependency; `uv run --with` fetches it for one run:
+
+```bash
+# Fuzz for a minute from the built-in seeds
+uv run --with atheris python tests/fuzzing/fuzz_config_files.py -max_total_time=60
+
+# Re-run one input, such as a crash file libFuzzer wrote
+uv run --with atheris python tests/fuzzing/fuzz_config_files.py crash-<hash>
+```
+
+`tests/test_fuzz_replay.py` runs every seed through the same checks in
+the normal test suite, without Atheris. When fuzzing finds a failing
+input, add it to the harness's `SEEDS` with the fix.
+
 ## Notes on Parity
 
 - Inputs, outputs, and environment usage match the original shell-based
