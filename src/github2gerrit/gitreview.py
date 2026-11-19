@@ -97,6 +97,22 @@ def _scan_fields(text: str) -> _Fields:
     return host, port, project
 
 
+def _read_port(text: str) -> int | None:
+    """Return *text* as a port number, or ``None`` when it names none.
+
+    ``int`` refuses a digit string longer than
+    ``sys.get_int_max_str_digits()`` with ``ValueError``; such a value
+    names no port, so it reads as absent rather than escaping
+    :func:`parse_gitreview`.
+    """
+    if _PORT_VALUE_RE.fullmatch(text) is None:
+        return None
+    try:
+        return int(text)
+    except ValueError:
+        return None
+
+
 @dataclass(frozen=True)
 class GitReviewInfo:
     """Parsed contents of a ``.gitreview`` file.
@@ -220,9 +236,9 @@ def parse_gitreview(text: str) -> GitReviewInfo | None:
         log.debug(".gitreview: host= line is empty")
         return None
 
-    port_text = (port_text or "").strip()
-    port_given = _PORT_VALUE_RE.fullmatch(port_text) is not None
-    port = int(port_text) if port_given else DEFAULT_GERRIT_PORT
+    port_number = _read_port((port_text or "").strip())
+    port_given = port_number is not None
+    port = DEFAULT_GERRIT_PORT if port_number is None else port_number
 
     project = (project_text or "").strip().removesuffix(".git")
 

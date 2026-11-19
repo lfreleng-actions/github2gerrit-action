@@ -1217,3 +1217,14 @@ class TestEdgeCases:
         assert hash(info) is not None
         s = {info}
         assert info in s
+
+    @pytest.mark.parametrize(
+        "header", ["[gerrit]\n", ""], ids=["configparser", "line-scan"]
+    )
+    def test_parse_oversized_port_reads_as_absent(self, header: str) -> None:
+        """A port too long for int() falls back to the default, not raise."""
+        text = f"{header}host=gerrit.example.org\nport={'1' * 5000}\n"
+        info = parse_gitreview(text)
+        assert info is not None
+        assert info.port == DEFAULT_GERRIT_PORT
+        assert info.port_given is False
