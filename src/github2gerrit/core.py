@@ -5248,32 +5248,6 @@ class Orchestrator:
                 "Failed to collect Change-Ids after apply_pr_title: %s", exc
             )
 
-    @staticmethod
-    def _append_missing_trailers(
-        message: str, trailers: list[str], *, ensure_final_newline: bool = True
-    ) -> str:
-        """Append missing trailers to a commit message with proper formatting.
-
-        Args:
-            message: The base commit message
-            trailers: List of trailer lines to potentially append
-            ensure_final_newline: Whether to ensure the message ends with a
-                newline
-
-        Returns:
-            The message with missing trailers appended, properly formatted
-        """
-        needed = [trailer for trailer in trailers if trailer not in message]
-        if not needed:
-            return message
-
-        result = message.rstrip() + "\n\n" + "\n".join(needed)
-
-        if ensure_final_newline:
-            result = result.rstrip("\n") + "\n"
-
-        return result
-
     def _push_to_gerrit(
         self,
         *,
