@@ -19,6 +19,9 @@ _MSG_INVALID_MODE = "Invalid mode"
 _MSG_NO_CHANGE_IDS = "At least one Change-ID is required"
 _MSG_INVALID_CHANGE_ID_FORMAT = "Invalid Change-ID format"
 
+_START_MARKER = "<!-- github2gerrit:change-id-map v1 -->"
+_END_MARKER = "<!-- end github2gerrit:change-id-map -->"
+
 
 @dataclass
 class ChangeIdMapping:
@@ -111,21 +114,14 @@ def parse_mapping_comments(comment_bodies: list[str]) -> ChangeIdMapping | None:
     """
     latest_mapping: ChangeIdMapping | None = None
 
-    start_marker = "<!-- github2gerrit:change-id-map v1 -->"
-    end_marker = "<!-- end github2gerrit:change-id-map -->"
-
     for body in comment_bodies:
-        if start_marker not in body or end_marker not in body:
-            continue
-
         try:
-            start_idx = body.find(start_marker)
-            end_idx = body.find(end_marker)
-
-            if start_idx == -1 or end_idx == -1 or end_idx <= start_idx:
+            span = _find_mapping_block(body)
+            if span is None:
                 continue
 
-            block = body[start_idx + len(start_marker) : end_idx].strip()
+            start_idx, end_idx = span
+            block = body[start_idx + len(_START_MARKER) : end_idx].strip()
             mapping = _parse_mapping_block(block)
 
             if mapping:
@@ -148,6 +144,32 @@ def parse_mapping_comments(comment_bodies: list[str]) -> ChangeIdMapping | None:
         )
 
     return latest_mapping
+
+
+def _find_mapping_block(body: str) -> tuple[int, int] | None:
+    """
+    Locate the first complete mapping block in a comment body.
+
+    A block runs from a start marker to the next end marker after it.
+    An end marker earlier in the body closes nothing, and when several
+    start markers precede the end marker the last one opens the block,
+    so text around a block, an unterminated block included, does not
+    change what is read from it.
+
+    Args:
+        body: Comment body text
+
+    Returns:
+        Offsets of the block's start marker and end marker, or None
+        when the body holds no complete block
+    """
+    first_start = body.find(_START_MARKER)
+    if first_start == -1:
+        return None
+    end_idx = body.find(_END_MARKER, first_start + len(_START_MARKER))
+    if end_idx == -1:
+        return None
+    return body.rfind(_START_MARKER, first_start, end_idx), end_idx
 
 
 def _parse_mapping_block(block: str) -> ChangeIdMapping | None:
@@ -233,10 +255,9 @@ def find_mapping_comments(comment_bodies: list[str]) -> list[int]:
         List of comment indices that contain mapping blocks
     """
     indices = []
-    start_marker = "<!-- github2gerrit:change-id-map v1 -->"
 
     for i, body in enumerate(comment_bodies):
-        if start_marker in body:
+        if _START_MARKER in body:
             indices.append(i)
 
     return indices
@@ -256,9 +277,6 @@ def update_mapping_comment_body(
     Returns:
         Updated comment body with new mapping
     """
-    start_marker = "<!-- github2gerrit:change-id-map v1 -->"
-    end_marker = "<!-- end github2gerrit:change-id-map -->"
-
     # Generate new mapping block
     new_block = serialize_mapping_comment(
         pr_url=new_mapping.pr_url,
@@ -266,25 +284,26 @@ def update_mapping_comment_body(
         topic=new_mapping.topic,
         change_ids=new_mapping.change_ids,
         github_hash=new_mapping.github_hash,
+        digest=new_mapping.digest or None,
     )
 
     # If no existing mapping, append the new one
-    if start_marker not in original_body:
+    if _START_MARKER not in original_body:
         if original_body and not original_body.endswith("\n"):
             return original_body + "\n\n" + new_block
         else:
             return original_body + new_block
 
     # Replace existing mapping
-    start_idx = original_body.find(start_marker)
-    end_idx = original_body.find(end_marker)
+    span = _find_mapping_block(original_body)
 
-    if start_idx == -1 or end_idx == -1:
+    if span is None:
         # Malformed existing mapping, append new one
         return original_body + "\n\n" + new_block
 
+    start_idx, end_idx = span
     # Include the end marker in the replacement
-    end_idx += len(end_marker)
+    end_idx += len(_END_MARKER)
 
     # Replace the old mapping with the new one
     updated_body = (

@@ -165,6 +165,27 @@ def test_parse_mapping_comments_deduplicates_ids():
     assert mapping.change_ids == ["I1111111111111111111111111111111111111111"]
 
 
+_END_MARKER = "<!-- end github2gerrit:change-id-map -->"
+_START_MARKER = "<!-- github2gerrit:change-id-map v1 -->"
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        pytest.param(f"{_END_MARKER}\n", id="stray-end-marker"),
+        pytest.param(
+            f"{_START_MARKER}\nChange-Ids:\n  I{'f' * 40}\n",
+            id="unterminated-block",
+        ),
+    ],
+)
+def test_parse_mapping_comments_ignores_text_before_block(prefix: str):
+    ids = _valid_ids(2)
+    mapping = parse_mapping_comments([prefix + _make_mapping_comment()])
+    assert mapping is not None
+    assert mapping.change_ids == ids
+
+
 # ---------------------------------------------------------------------------
 # Mapping replacement
 # ---------------------------------------------------------------------------
@@ -200,6 +221,43 @@ def test_update_mapping_comment_body_appends_when_missing():
     assert "Initial discussion comment." in updated
     assert "Change-Ids:" in updated
     assert updated.endswith("-->"), "Should include end marker"
+
+
+def test_update_mapping_comment_body_keeps_digest():
+    new_mapping = ChangeIdMapping(
+        pr_url="https://github.com/org/repo/pull/7",
+        mode="squash",
+        topic="GH-org-repo-7",
+        change_ids=_valid_ids(1),
+        github_hash="h",
+        digest="0123456789ab",
+    )
+    updated = update_mapping_comment_body(_make_mapping_comment(), new_mapping)
+    assert parse_mapping_comments([updated]) == new_mapping
+
+
+@pytest.mark.parametrize(
+    "original",
+    [
+        pytest.param(f"{_END_MARKER} old", id="stray-end-marker"),
+        pytest.param(
+            f"{_START_MARKER}\nChange-Ids:\n  I{'f' * 40}\n",
+            id="unterminated-block",
+        ),
+    ],
+)
+def test_update_mapping_comment_body_result_parses_to_new_mapping(
+    original: str,
+):
+    new_mapping = ChangeIdMapping(
+        pr_url="https://github.com/org/repo/pull/7",
+        mode="squash",
+        topic="GH-org-repo-7",
+        change_ids=_valid_ids(1),
+        github_hash="h",
+    )
+    updated = update_mapping_comment_body(original, new_mapping)
+    assert parse_mapping_comments([updated]) == new_mapping
 
 
 # ---------------------------------------------------------------------------
