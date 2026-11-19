@@ -169,6 +169,11 @@ def add_trailers(commit_message: str, new_trailers: dict[str, str]) -> str:
     """
     Add trailers to a commit message, avoiding duplicates.
 
+    When the message already ends in a trailer block (see
+    find_trailer_boundary), the new trailers join that block, so
+    parse_trailers still finds the existing ones. Otherwise they start
+    a new block after one blank line.
+
     Args:
         commit_message: Original commit message
         new_trailers: Dictionary of trailers to add (key -> value)
@@ -189,11 +194,15 @@ def add_trailers(commit_message: str, new_trailers: dict[str, str]) -> str:
             to_add.append(f"{key}: {value}")
 
     if to_add:
-        if msg and not msg.endswith("\n"):
-            msg += "\n"
-        if not msg.endswith("\n\n"):
-            msg += "\n"
-        msg += "\n".join(to_add) + "\n"
+        lines = msg.splitlines()
+        has_block = find_trailer_boundary(lines) < len(lines)
+        if not msg:
+            separator = ""
+        elif has_block:
+            separator = "\n"
+        else:
+            separator = "\n\n"
+        msg += separator + "\n".join(to_add) + "\n"
 
     return msg
 

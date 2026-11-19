@@ -89,7 +89,6 @@ def test_has_trailer_any_value_and_specific():
     assert not has_trailer(msg, "X", "3")
 
 
-@pytest.mark.xfail(strict=True, reason="add_trailers splits the block")
 def test_add_trailers_deduplicates_and_appends():
     base = "Title\n\nBody."
     out = add_trailers(base, {"A": "1", "B": "2"})
@@ -100,7 +99,6 @@ def test_add_trailers_deduplicates_and_appends():
     assert again == "Title\n\nBody.\n\nA: 1\nB: 2\nC: 3\n"
 
 
-@pytest.mark.xfail(strict=True, reason="add_trailers splits the block")
 def test_add_trailers_joins_existing_trailer_block():
     msg = (
         "Fix the widget\n\nLonger explanation.\n\n"
@@ -213,7 +211,6 @@ def test_compute_jaccard_similarity_partial_overlap():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason="add_trailers splits the block")
 def test_parse_then_add_trailers_integration():
     original = "T\n\nA: 1\n"
     added = add_trailers(original, {"A": "1", "B": "2"})
