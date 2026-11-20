@@ -198,12 +198,22 @@ class NetrcParser:
         return "".join(result)
 
     def _strip_inline_comment(self, text: str) -> str:
-        """Strip inline comment from a line, respecting quotes."""
+        """Strip inline comment from a line, respecting quotes.
+
+        Inside a quoted string a backslash escapes the next character, as
+        the tokenizer reads it, so ``"a\\\\"`` closes after the escaped
+        backslash and a ``#`` after it starts a comment.
+        """
         if "#" not in text:
             return text
         in_quotes = False
+        escaped = False
         for i, char in enumerate(text):
-            if char == '"' and (i == 0 or text[i - 1] != "\\"):
+            if escaped:
+                escaped = False
+            elif in_quotes and char == "\\":
+                escaped = True
+            elif char == '"':
                 in_quotes = not in_quotes
             elif char == "#" and not in_quotes:
                 return text[:i]

@@ -1027,3 +1027,14 @@ class TestEdgeCases:
         )
         assert result.get_body_value("Type") == "type-42"
         assert result.get_trailer_value("Issue-ID") == "ID-7"
+
+    @pytest.mark.parametrize(
+        "json_str",
+        [
+            pytest.param("1" * 5000, id="integer-over-digit-limit"),
+            pytest.param("[" * 100_000, id="nesting-too-deep"),
+        ],
+    )
+    def test_unparsable_json_beyond_decoder_errors(self, json_str: str) -> None:
+        """Inputs json.loads rejects without JSONDecodeError return None."""
+        assert parse_commit_rules_json(json_str) is None
