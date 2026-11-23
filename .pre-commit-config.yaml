@@ -5,7 +5,6 @@
 ci:
   autofix_prs: false
   skip:
-    - pytest
     - mypy
     - gha-workflow-linter
     - aislop
@@ -220,14 +219,3 @@ repos:
         types:
           - yaml
       - id: check-readthedocs
-
-  - repo: local
-    hooks:
-      - id: pytest
-        name: pytest
-        entry: uv
-        args: [run, pytest, --tb=short, -q, -v, --strict-markers, --maxfail=5]
-        language: system
-        pass_filenames: false
-        always_run: true
-        require_serial: true

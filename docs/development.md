@@ -23,7 +23,9 @@ github2gerrit action and its Python CLI.
   CI. prek is a faster, Rust-based drop-in replacement for pre-commit that
   reads the existing `.pre-commit-config.yaml` unchanged.
 - **Tests**: pytest with coverage targets around 80%. Add unit and
-  integration tests for each feature.
+  integration tests for each feature. CI runs the suite on every pull
+  request; run it locally with `uv run pytest`. The prek hooks do not
+  run the tests.
 
 ## Local Setup
 
@@ -43,10 +45,10 @@ uv tool install prek && prek install -f
 Run checks:
 
 ```bash
-# All checks (including tests)
+# Linting hooks (these do not run the tests)
 prek run --all-files
 
-# Tests only
+# Tests
 uv run pytest -q
 
 # Lint and type check
