@@ -31,6 +31,11 @@ concurrency:
 
 permissions: {}
 
+# Turn off GitHub CLI telemetry: steps below run 'gh', which
+# otherwise posts usage events to cafe.github.com.
+env:
+  GH_TELEMETRY: 'false'
+
 jobs:
   ### Test the reusable workflow path used by production callers ###
   # This exercises the workflow_call plumbing that the composite
