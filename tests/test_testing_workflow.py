@@ -228,9 +228,6 @@ def test_every_live_gerrit_step_authenticates_rest() -> None:
         ), step["name"]
 
 
-@pytest.mark.xfail(
-    strict=True, reason="#578: CLI steps do not yet set CLOSE_MERGED_PRS"
-)
 def test_every_cli_step_leaves_sandbox_prs_open() -> None:
     # CLOSE_MERGED_PRS defaults to true: if the Gerrit change for a
     # sandbox pull request is abandoned, the tool would close the pull

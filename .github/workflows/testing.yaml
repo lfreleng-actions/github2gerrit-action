@@ -215,6 +215,8 @@ jobs:
           G2G_ENABLE_DERIVATION: 'false'
           ALLOW_DUPLICATES: 'true'
           PRESERVE_GITHUB_PRS: 'true'
+          # An abandoned sandbox change must not close the sandbox PR
+          CLOSE_MERGED_PRS: 'false'
           G2G_VERBOSE: 'true'
           FETCH_DEPTH: '50'
           USE_PR_AS_COMMIT: 'true'
@@ -330,6 +332,8 @@ jobs:
           G2G_ENABLE_DERIVATION: 'false'
           ALLOW_DUPLICATES: 'true'
           PRESERVE_GITHUB_PRS: 'true'
+          # An abandoned sandbox change must not close the sandbox PR
+          CLOSE_MERGED_PRS: 'false'
           G2G_VERBOSE: 'true'
           FETCH_DEPTH: '50'
           USE_PR_AS_COMMIT: 'true'
