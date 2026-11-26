@@ -228,6 +228,24 @@ def test_every_live_gerrit_step_authenticates_rest() -> None:
         ), step["name"]
 
 
+def test_every_cli_step_leaves_sandbox_prs_open() -> None:
+    # CLOSE_MERGED_PRS defaults to true: if the Gerrit change for a
+    # sandbox pull request is abandoned, the tool would close the pull
+    # request in lfit/sandbox, which this repository does not own
+    cli = [
+        step
+        for step in _all_steps()
+        if "github2gerrit.cli" in step.get("run", "")
+    ]
+    assert cli
+    offenders = [
+        step.get("name")
+        for step in cli
+        if step.get("env", {}).get("CLOSE_MERGED_PRS") != "false"
+    ]
+    assert offenders == []
+
+
 def test_no_step_reads_fixture_pr_urls_directly() -> None:
     readers = [
         step.get("name")
